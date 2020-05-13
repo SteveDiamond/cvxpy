@@ -3,4 +3,5 @@ def dgp_wrap_canon(expr, args):
     """
     func = expr.function
     del expr
-    return func(*args)
+    print(args[0].value)
+    return func(*args), []

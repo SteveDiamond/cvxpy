@@ -61,7 +61,7 @@ class dgp_wrap(Expression):
         # Applies DCP composition rule.
         if self.is_constant():
             return True
-        elif self.is_atom_convex():
+        elif self.func_expr.is_atom_convex():
             for idx, arg in enumerate(self.args):
                 if not (arg.is_affine() or
                         (arg.is_convex() and self.is_incr(idx)) or
@@ -81,7 +81,7 @@ class dgp_wrap(Expression):
         # Applies DCP composition rule.
         if self.is_constant():
             return True
-        elif self.is_atom_concave():
+        elif self.func_expr.is_atom_concave():
             for idx, arg in enumerate(self.args):
                 if not (arg.is_affine() or
                         (arg.is_concave() and self.is_incr(idx)) or

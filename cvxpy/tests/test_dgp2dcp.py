@@ -616,16 +616,20 @@ class TestDgp2Dcp(BaseTest):
         x = cvxpy.Variable(2, pos=True)
         A = np.matrix("-5 2; 1 -3").A
         b = np.array([3, 2])
-        expr = cvxpy.transforms.dgp_wrap(cvxpy.matmul, A, x)
+        expr = cvxpy.transforms.dgp_wrap(cvxpy.matmul,
+                                         cvxpy.exp(A),
+                                         x)
         x.value = b
         self.assertItemsAlmostEqual(expr.value, [3**-5*2**2, 3./8])
         A_par = cvxpy.Parameter((2, 2), value=A)
-        param_expr = cvxpy.transforms.dgp_wrap(cvxpy.matmul, A_par, x)
+        param_expr = cvxpy.transforms.dgp_wrap(cvxpy.matmul,
+                                               cvxpy.exp(A_par),
+                                               x)
         self.assertItemsAlmostEqual(param_expr.value,
                                     [3**-5*2**2, 3./8])
         x.value = None
 
         prob = cvxpy.Problem(cvxpy.Minimize(1.0), [expr == b])
-        prob.solve(gp=True)
+        prob.solve(gp=True, solver=cvxpy.SCS)
         sltn = np.exp(np.linalg.solve(A, np.log(b)))
         self.assertItemsAlmostEqual(x.value, sltn)

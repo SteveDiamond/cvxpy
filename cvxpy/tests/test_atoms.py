@@ -48,7 +48,7 @@ class TestAtoms(BaseTest):
         self.C = Variable((3, 2), name='C')
 
     def test_add_expr_copy(self) -> None:
-        """Test the copy function for AddExpresion class.
+        """Test the copy function for AddExpression class.
         """
         atom = self.x + self.y
         copy = atom.copy()

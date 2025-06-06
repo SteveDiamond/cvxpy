@@ -564,7 +564,6 @@ class TestComplex(BaseTest):
                      cp.log, cp.log1p, cp.logistic]:
             name = atom.__name__
             with self.assertRaises(Exception) as cm:
-                print(name)
                 atom(x)
             self.assertEqual(str(cm.exception), "Arguments to %s cannot be complex." % name)
 
@@ -572,7 +571,6 @@ class TestComplex(BaseTest):
         for atom in [cp.maximum, cp.kl_div]:
             name = atom.__name__
             with self.assertRaises(Exception) as cm:
-                print(name)
                 atom(x, x)
             self.assertEqual(str(cm.exception), "Arguments to %s cannot be complex." % name)
 

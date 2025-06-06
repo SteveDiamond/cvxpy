@@ -66,7 +66,7 @@ class PowCone3D(Cone):
         else:
             arg_shapes = [self.x.shape, self.y.shape, self.z.shape, self.alpha.shape]
         if any(arg_shapes[0] != s for s in arg_shapes[1:]):
-            msg = ("All arguments must have the same shapes. Provided arguments have"
+            msg = ("All arguments must have the same shapes. Provided arguments have "
                    "shapes %s" % str(arg_shapes))
             raise ValueError(msg)
         super(PowCone3D, self).__init__([self.x, self.y, self.z],

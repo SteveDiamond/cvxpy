@@ -372,7 +372,7 @@ class TestSCS(BaseTest):
 
             # Check problem data.
             data = prob.get_problem_data(solver=cp.SCS, solver_opts={"use_quad_obj": True})
-            # Quadratic objective and SOC contraints.
+            # Quadratic objective and SOC constraints.
             assert "P" in data[0]
             assert data[0]["dims"].soc
 

@@ -533,7 +533,7 @@ class MOSEK(ConicSolver):
             raw_iis_sol = Solution(s.OPTIMAL, prob_val, prim_vars, dual_vars, attr)
             iis_sol = Dualize.invert(raw_iis_sol, inverse_data)
             # IIS is a map of constraint id to a value of
-            # dimension equal to the contraint dual variable.
+            # dimension equal to the constraint dual variable.
             # That value has non-zero entries iff the constraint
             # is in the IIS.
             attr[s.EXTRA_STATS] = {"IIS": iis_sol.dual_vars}

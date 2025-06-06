@@ -611,7 +611,7 @@ class TestExpressions(BaseTest):
         self.assertEqual(A.is_psd(), True)
         self.assertEqual(A.is_nsd(), True)
 
-    # Test the AddExpresion class.
+    # Test the AddExpression class.
     def test_add_expression(self) -> None:
         # Vectors
         c = Constant([2, 2])

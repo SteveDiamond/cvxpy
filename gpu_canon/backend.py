@@ -97,7 +97,24 @@ class CompiledProgram:
                 if mat.dtype == object:
                     # Non-parametric problems have object dtype — can't transfer
                     return
-                self._A_tensor_gpu = cusp.csr_matrix(mat)
+
+                # Detect gather pattern: every row has exactly 1 nonzero.
+                # In this case, sparse matmul reduces to:
+                #   flat_data[i] = scale[i] * param_vec[gather_idx[i]]
+                # which is a simple gather + elementwise multiply.
+                nnz_per_row = np.diff(mat.indptr)
+                if nnz_per_row.max() == 1 and nnz_per_row.min() == 1:
+                    self._gather_mode = True
+                    self._gather_idx = cup.asarray(mat.indices.copy())
+                    self._gather_scale = cup.asarray(mat.data.copy())
+                    # Check if all scales are just +1 or -1 (common case)
+                    unique_abs = np.unique(np.abs(mat.data))
+                    self._gather_unit_scale = (
+                        len(unique_abs) == 1 and np.isclose(unique_abs[0], 1.0))
+                    self._A_tensor_gpu = None  # not needed for gather
+                else:
+                    self._gather_mode = False
+                    self._A_tensor_gpu = cusp.csr_matrix(mat)
             except Exception:
                 return
         else:
@@ -142,11 +159,19 @@ class CompiledProgram:
         self._A_nonzero_rows = ra.mapping_nonzero
 
         # Objective tensor (q)
+        self._q_gather_mode = False
         if pp.q is not None and sp.issparse(pp.q):
             try:
                 q_mat = pp.q.tocsr()
                 if q_mat.dtype != object:
-                    self._q_tensor_gpu = cusp.csr_matrix(q_mat)
+                    nnz_per_row = np.diff(q_mat.indptr)
+                    if nnz_per_row.max() == 1 and nnz_per_row.min() == 1:
+                        self._q_gather_mode = True
+                        self._q_gather_idx = cup.asarray(q_mat.indices.copy())
+                        self._q_gather_scale = cup.asarray(q_mat.data.copy())
+                        self._q_tensor_gpu = None
+                    else:
+                        self._q_tensor_gpu = cusp.csr_matrix(q_mat)
                 else:
                     self._q_tensor_gpu = None
             except Exception:
@@ -235,12 +260,27 @@ class CompiledProgram:
         c_gpu = self._apply_objective(param_vec_gpu)
         return A_gpu, b_gpu, c_gpu, self.cone_dims
 
+    def _compute_flat_data(self, param_vec_gpu: cup.ndarray) -> cup.ndarray:
+        """Compute flat problem data from parameter vector.
+
+        Uses gather+multiply when the tensor has exactly 1 nnz per row
+        (common case for DPP), otherwise falls back to sparse matmul.
+        """
+        if self._gather_mode:
+            if self._gather_unit_scale:
+                # All scales are +/-1: just gather with sign flip
+                return self._gather_scale * param_vec_gpu[self._gather_idx]
+            else:
+                return self._gather_scale * param_vec_gpu[self._gather_idx]
+        else:
+            return self._A_tensor_gpu @ param_vec_gpu
+
     def _apply_A_b(self, param_vec_gpu: cup.ndarray) -> tuple:
         """Compute A matrix and b vector from parameter vector."""
-        if self._A_tensor_gpu is None:
+        if self._A_tensor_gpu is None and not self._gather_mode:
             return self._A_gpu, self._b_gpu
 
-        flat_data = self._A_tensor_gpu @ param_vec_gpu
+        flat_data = self._compute_flat_data(param_vec_gpu)
 
         if self._A_pdi_mode:
             split = self._A_flat_split
@@ -268,10 +308,10 @@ class CompiledProgram:
 
     def _apply_A_b_inplace(self, param_vec_gpu: cup.ndarray) -> tuple:
         """Compute A and b, reusing cached GPU objects to minimize allocation."""
-        if self._A_tensor_gpu is None:
+        if self._A_tensor_gpu is None and not self._gather_mode:
             return self._A_gpu, self._b_gpu
 
-        flat_data = self._A_tensor_gpu @ param_vec_gpu
+        flat_data = self._compute_flat_data(param_vec_gpu)
 
         if self._A_pdi_mode:
             split = self._A_flat_split

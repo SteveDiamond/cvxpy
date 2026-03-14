@@ -70,7 +70,7 @@ def make_dpp_portfolio(n):
     Sigma = F @ F.T + np.diag(np.random.rand(n) * 0.1)
     gamma = cp.Parameter(nonneg=True)
     prob = cp.Problem(
-        cp.Maximize(mu @ x - gamma * cp.quad_form(x, Sigma)),
+        cp.Maximize(mu @ x - gamma * cp.quad_form(x, cp.psd_wrap(Sigma))),
         [cp.sum(x) == 1, x >= 0],
     )
     mu.value = np.random.randn(n) * 0.1

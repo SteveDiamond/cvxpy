@@ -351,8 +351,11 @@ class CompiledProgram:
     def _apply_objective(self, param_vec_gpu: cup.ndarray) -> cup.ndarray:
         """Compute objective vector c from parameter vector."""
         c_gpu = self._c_gpu
-        if self._q_tensor_gpu is not None:
-            qd = self._q_tensor_gpu @ param_vec_gpu
+        if self._q_tensor_gpu is not None or self._q_gather_mode:
+            if self._q_gather_mode:
+                qd = self._q_gather_scale * param_vec_gpu[self._q_gather_idx]
+            else:
+                qd = self._q_tensor_gpu @ param_vec_gpu
             n_q_cols = self._x_size + 1
             if qd.size >= n_q_cols:
                 n_q_rows = qd.size // n_q_cols

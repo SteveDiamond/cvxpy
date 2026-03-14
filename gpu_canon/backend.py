@@ -105,15 +105,39 @@ class CompiledProgram:
             return
 
         # Cache the CSC index structure (static sparsity pattern)
+        # In PDI mode, the CSC shape is (n_rows, var_len + 1) where the
+        # last column holds the b (offset) vector. We pre-compute separate
+        # index structures for A (first var_len cols) and b (last col) so
+        # the hot path can assemble them independently.
+        self._A_var_len = ra.var_len
         if ra.problem_data_index is not None:
             indices, indptr, shape = ra.problem_data_index
-            self._A_indices_gpu = cup.asarray(indices)
-            self._A_indptr_gpu = cup.asarray(indptr)
-            self._A_csc_shape = shape
+            n_rows, n_cols = shape
+            # n_cols == var_len + 1; last column is b
+            assert n_cols == ra.var_len + 1, (
+                f"PDI shape mismatch: {n_cols} cols vs var_len+1={ra.var_len + 1}")
+
+            # Split the CSC structure: columns 0..var_len-1 are A,
+            # column var_len is b.
+            # CSC indptr has n_cols+1 entries. A uses indptr[0:var_len+1],
+            # b uses indptr[var_len:var_len+2].
+            a_end = int(indptr[n_cols - 1])  # where A data ends / b data starts
+            b_end = int(indptr[n_cols])       # end of b data
+
+            # A sparsity: indices/data for columns 0..var_len-1
+            self._A_indices_gpu = cup.asarray(indices[:a_end])
+            self._A_indptr_gpu = cup.asarray(indptr[:n_cols])  # var_len+1 entries
+            self._A_csc_shape = (n_rows, n_cols - 1)
+            self._A_flat_split = a_end  # index into flat_data where b starts
+
+            # b sparsity: indices/data for the last column
+            self._b_indices_gpu = cup.asarray(indices[a_end:b_end])
+            self._b_nnz = b_end - a_end
+            self._b_size = n_rows
+
             self._A_pdi_mode = True
         else:
             self._A_pdi_mode = False
-            self._A_var_len = ra.var_len
 
         self._A_nonzero_rows = ra.mapping_nonzero
 
@@ -176,44 +200,42 @@ class CompiledProgram:
 
         # === HOT PATH: all GPU from here ===
 
-        # A matrix: flat_data = A_tensor @ param_vec, then reassemble CSC
+        # A matrix + b vector: flat_data = A_tensor @ param_vec
         if self._A_tensor_gpu is not None:
             flat_data = self._A_tensor_gpu @ param_vec_gpu
 
             if self._A_pdi_mode:
-                # Reassemble CSC using cached index structure
+                # PDI mode: flat_data contains interleaved A and b values.
+                # We pre-split the CSC index structure in _setup_dpp_gpu so
+                # we can assemble A and extract b with zero extra copies.
+                split = self._A_flat_split
+
+                # A: CSC from first `split` values
                 A_gpu = cusp.csc_matrix(
-                    (flat_data, self._A_indices_gpu, self._A_indptr_gpu),
+                    (flat_data[:split],
+                     self._A_indices_gpu,
+                     self._A_indptr_gpu),
                     shape=self._A_csc_shape,
                 )
+
+                # b: scatter the last (b_nnz) values into a dense vector
+                if self._b_nnz > 0:
+                    b_gpu = cup.zeros(self._b_size, dtype=flat_data.dtype)
+                    b_gpu[self._b_indices_gpu] = flat_data[split:split + self._b_nnz]
+                else:
+                    b_gpu = cup.zeros(self._b_size, dtype=flat_data.dtype)
             else:
-                # Reshape into dense matrix then extract A and b
+                # Non-PDI: reshape into dense matrix then extract A and b
                 n_cols = self._A_var_len + 1
                 n_rows = flat_data.size // n_cols
                 M = flat_data.reshape((n_rows, n_cols), order='F')
                 A_gpu = cusp.csc_matrix(M[:, :-1])
                 b_gpu = M[:, -1].ravel()
-                # Objective
-                c_gpu = self._c_gpu
-                if self._q_tensor_gpu is not None:
-                    qd = self._q_tensor_gpu @ param_vec_gpu
-                    n_q_cols = self._x_size + 1
-                    n_q_rows = qd.size // n_q_cols
-                    Q = qd.reshape((n_q_rows, n_q_cols), order='F')
-                    c_gpu = Q[:, :-1].ravel()
-                return A_gpu, b_gpu, c_gpu, self.cone_dims
         else:
             A_gpu = self._A_gpu
+            b_gpu = self._b_gpu
 
-        # b vector from A matrix (last column is offset)
-        if self._A_pdi_mode and A_gpu is not None:
-            # b is extracted differently in PDI mode
-            # The CSC matrix already has the right structure
-            # b comes from the offset in the param computation
-            # For now, recompute from the full system
-            pass
-
-        # Objective: c = q_tensor @ param_vec
+        # Objective: c = q_tensor @ param_vec (with offset d)
         c_gpu = self._c_gpu
         if self._q_tensor_gpu is not None:
             qd = self._q_tensor_gpu @ param_vec_gpu
@@ -224,7 +246,7 @@ class CompiledProgram:
                 c_gpu = Q[:, :-1].ravel()
                 # d (offset) = Q[:, -1] — ignored for now
 
-        return A_gpu, self._b_gpu, c_gpu, self.cone_dims
+        return A_gpu, b_gpu, c_gpu, self.cone_dims
 
 
 def canonicalize_gpu(

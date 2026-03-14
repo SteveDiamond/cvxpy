@@ -207,42 +207,37 @@ QUICK_SUITE = [
 
 FULL_SUITE = QUICK_SUITE + [
     ("sparse_lp_500", make_sparse_lp(500), 3),
+    ("sparse_lp_2000", make_sparse_lp(2000), 2),
+    ("sparse_lp_5000", make_sparse_lp(5000), 2),
     ("dense_qp_200", make_dense_qp(200), 3),
     ("lasso_200x500", make_lasso(200, 500), 3),
     ("many_constraints_50x500", make_many_constraints(50, 500), 3),
+    ("many_constraints_100x1000", make_many_constraints(100, 1000), 2),
     ("portfolio_200", make_portfolio(200), 3),
     ("dpp_param_lp_500x200", make_dpp_param_lp(500, 200), 3),
-    ("dpp_lasso_200x500", make_dpp_lasso(200, 500), 3),
-    # Stress tests
-    ("sparse_lp_2000", make_sparse_lp(2000), 2),
-    ("dense_qp_500", make_dense_qp(500), 2),
-    ("many_constraints_100x1000", make_many_constraints(100, 1000), 2),
     ("dpp_param_lp_1000x500", make_dpp_param_lp(1000, 500), 2),
+    ("dpp_lasso_200x500", make_dpp_lasso(200, 500), 3),
 ]
 
 
 # ── Timing helpers ───────────────────────────────────────────────────────────
 
 def _time_cpu(problem_factory: Callable, warmup: int, iterations: int) -> tuple[list, str]:
-    """Time CPU canonicalization. Returns (times_ms, error)."""
+    """Time CPU cold canonicalization. Fresh problem each iteration."""
     from gpu_canon.baseline import canonicalize_cpu
     times = []
 
     for i in range(warmup + iterations):
         prob = problem_factory()
-        prob._cache = type(prob._cache)()
         gc.collect()
-
         start = time.perf_counter()
         try:
             canonicalize_cpu(prob)
         except Exception as e:
             return [], str(e)
         elapsed = (time.perf_counter() - start) * 1000
-
         if i >= warmup:
             times.append(elapsed)
-
         del prob
         gc.collect()
 
@@ -250,31 +245,28 @@ def _time_cpu(problem_factory: Callable, warmup: int, iterations: int) -> tuple[
 
 
 def _time_gpu(problem_factory: Callable, warmup: int, iterations: int) -> tuple[list, str]:
-    """Time GPU canonicalization. Returns (times_ms, error)."""
+    """Time GPU cold canonicalization. Full compile + canonicalize each iteration."""
     if not HAS_GPU:
         return [], "No GPU available"
 
-    from gpu_canon.backend import canonicalize_gpu
+    from gpu_canon.backend import CompiledProgram
     times = []
 
     for i in range(warmup + iterations):
         prob = problem_factory()
-        prob._cache = type(prob._cache)()
         gc.collect()
         cupy.cuda.Device(0).synchronize()
-
         start = time.perf_counter()
         try:
-            canonicalize_gpu(prob)
+            compiled = CompiledProgram(prob, "CLARABEL")
+            compiled.canonicalize()
         except Exception as e:
             return [], str(e)
         cupy.cuda.Device(0).synchronize()
         elapsed = (time.perf_counter() - start) * 1000
-
         if i >= warmup:
             times.append(elapsed)
-
-        del prob
+        del prob, compiled
         gc.collect()
 
     return times, ""

@@ -17,10 +17,12 @@ import cvxpy
 def canonicalize_cpu(
     problem: cvxpy.Problem,
     solver: str = "CLARABEL",
-    backend: str = "SCIPY",
+    backend: str = "COO",
 ) -> tuple[Any, Any, Any, dict]:
     """
     Canonicalize a CVXPY Problem using CVXPY's CPU reduction chain.
+
+    Uses COO backend by default — fastest CPU backend, especially for DPP.
 
     Args:
         problem: A cvxpy.Problem instance

@@ -404,7 +404,7 @@ class Coordinator:
 
     def check_tried(self, description: str, limit: int = 3) -> list[dict]:
         """Search for similar past experiments. Call before starting any experiment."""
-        matches = self._search(description, limit=limit, prefix=f"{NAMESPACE}/results/")
+        matches = self._search(description, limit=limit, prefix=f"{self.namespace}/results/")
         if matches:
             print(f"Found {len(matches)} similar past experiments:")
             for m in matches:
@@ -430,7 +430,7 @@ class Coordinator:
     ) -> str:
         """Store execution trace as searchable insight in Ensue."""
         slug = _slugify(f"{problem_name}-{backend}")
-        key = f"{NAMESPACE}/traces/{slug}"
+        key = f"{self.namespace}/traces/{slug}"
 
         top_funcs = trace_data[:10] if trace_data else []
         summary = ", ".join(

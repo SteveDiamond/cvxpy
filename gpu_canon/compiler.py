@@ -90,20 +90,34 @@ def _fast_extract_affine(expr, var_id_to_col, n_vars):
             neg_arg = arg1.args[0]
 
             if isinstance(lhs, (Constant, Parameter)) and isinstance(rhs, Variable) and isinstance(neg_arg, Constant):
-                A_mat = _to_dense(lhs.value)
-                b_vec = _to_dense(neg_arg.value).ravel()
+                A_val = lhs.value
+                b_val = neg_arg.value
                 col_start = var_id_to_col[rhs.id]
 
+                # Handle b vector (may be sparse or scalar)
+                if sp.issparse(b_val):
+                    b_vec = np.asarray(b_val.toarray(), dtype=np.float64).ravel()
+                elif np.isscalar(b_val):
+                    b_vec = np.array([float(b_val)], dtype=np.float64)
+                else:
+                    b_vec = np.asarray(b_val, dtype=np.float64).ravel()
+
+                # Handle A matrix (may be sparse)
+                if sp.issparse(A_val):
+                    coo = A_val.tocoo()
+                    n_rows = coo.shape[0]
+                    A_data = np.asarray(coo.data, dtype=np.float64)
+                    A_cols = np.asarray(coo.col, dtype=np.int32) + col_start
+                    return A_data, A_cols, b_vec, n_rows
+
+                A_mat = np.asarray(A_val, dtype=np.float64)
                 if A_mat.ndim == 1:
-                    # a @ x (scalar result): 1 row
                     n_rows = 1
                     nz = np.nonzero(A_mat)[0]
                     A_data = A_mat[nz]
                     A_cols = nz + col_start
-                    row_indices = np.zeros(len(nz), dtype=np.int32)
                     return A_data, A_cols, b_vec, n_rows
                 else:
-                    # A @ x (matrix result): m rows
                     n_rows = A_mat.shape[0]
                     nz_rows, nz_cols = np.nonzero(A_mat)
                     A_data = A_mat[nz_rows, nz_cols]
@@ -359,101 +373,33 @@ def compile_to_gpu(problem: cvxpy.Problem) -> tuple:
     if not is_minimize:
         c_vec = -c_vec
 
-    # Step 3: Constraints — fast path first, slow path fallback
-    # Separate into eq and ineq, equalities first (Clarabel convention)
-    eq_constraints = []
-    ineq_constraints = []
-    for constr in problem.constraints:
-        if isinstance(constr, (Zero, Equality)):
-            eq_constraints.append(constr)
-        else:
-            ineq_constraints.append(constr)
+    # Step 3: Constraints — always use COO builder, with fast extraction
+    eq_constraints = [c for c in problem.constraints if isinstance(c, (Zero, Equality))]
+    ineq_constraints = [c for c in problem.constraints if not isinstance(c, (Zero, Equality))]
 
-    # Batch extraction using numpy arrays for fast-path constraints
-    all_rows = []
-    all_cols = []
-    all_data = []
-    all_b = []
+    A_coo = COOBuilder()
     current_row = 0
     n_eq = 0
     n_ineq = 0
-
-    # Use slow-path COO builder for constraints that don't match fast path
-    slow_coo = COOBuilder()
+    b_parts = []
 
     for constr_list, cone_type in [(eq_constraints, "eq"), (ineq_constraints, "ineq")]:
         for constr in constr_list:
             n_rows = constr.size
+            b_local = np.zeros(n_rows, dtype=np.float64)
 
-            # Try fast path
-            fast = _fast_extract_constraint(constr, var_id_to_col, n_vars)
-            if fast is not None:
-                A_data, A_cols, b_vals, n_r, _ = fast
-                # Build row indices
-                if len(A_data) > 0:
-                    if A_data.ndim == 0:
-                        A_data = np.array([float(A_data)])
-                    # For matrix patterns, we need proper row indices
-                    if hasattr(A_cols, '__len__') and len(A_cols) == len(A_data):
-                        # Compute row indices from the original matrix nonzeros
-                        # For 1-row patterns, all rows are 0
-                        if n_r == 1:
-                            row_idx = np.zeros(len(A_data), dtype=np.int32) + current_row
-                        else:
-                            # Need to reconstruct row indices from the original extraction
-                            # The fast path returns flat arrays from np.nonzero
-                            # For A_mat case: nz_rows were captured
-                            # We need to re-extract with row info
-                            # Fall back to slow path for multi-row matrix patterns
-                            # (fast path only reliable for single-row and diagonal patterns)
-                            expr = constr.expr
-                            b_slow = np.zeros(n_rows, dtype=np.float64)
-                            if cone_type == "eq":
-                                _extract_affine_coeffs(expr, var_id_to_col, n_vars,
-                                                       slow_coo, b_slow, current_row, 1.0)
-                                all_b.append(-b_slow)
-                            elif isinstance(constr, NonNeg):
-                                _extract_affine_coeffs(expr, var_id_to_col, n_vars,
-                                                       slow_coo, b_slow, current_row, -1.0)
-                                all_b.append(b_slow)
-                            else:
-                                _extract_affine_coeffs(expr, var_id_to_col, n_vars,
-                                                       slow_coo, b_slow, current_row, 1.0)
-                                all_b.append(-b_slow)
-
-                            current_row += n_rows
-                            if cone_type == "eq":
-                                n_eq += n_rows
-                            else:
-                                n_ineq += n_rows
-                            continue
-
-                        all_rows.append(row_idx)
-                        all_cols.append(np.asarray(A_cols, dtype=np.int32))
-                        all_data.append(np.asarray(A_data, dtype=np.float64))
-
-                all_b.append(np.asarray(b_vals, dtype=np.float64).ravel())
-                current_row += n_rows
-                if cone_type == "eq":
-                    n_eq += n_rows
-                else:
-                    n_ineq += n_rows
-                continue
-
-            # Slow path
-            b_slow = np.zeros(n_rows, dtype=np.float64)
             if cone_type == "eq":
                 _extract_affine_coeffs(constr.expr, var_id_to_col, n_vars,
-                                       slow_coo, b_slow, current_row, 1.0)
-                all_b.append(-b_slow)
+                                       A_coo, b_local, current_row, 1.0)
+                b_parts.append(-b_local)
             elif isinstance(constr, NonNeg):
                 _extract_affine_coeffs(constr.expr, var_id_to_col, n_vars,
-                                       slow_coo, b_slow, current_row, -1.0)
-                all_b.append(b_slow)
+                                       A_coo, b_local, current_row, -1.0)
+                b_parts.append(b_local)
             else:
                 _extract_affine_coeffs(constr.expr, var_id_to_col, n_vars,
-                                       slow_coo, b_slow, current_row, 1.0)
-                all_b.append(-b_slow)
+                                       A_coo, b_local, current_row, 1.0)
+                b_parts.append(-b_local)
 
             current_row += n_rows
             if cone_type == "eq":
@@ -461,20 +407,11 @@ def compile_to_gpu(problem: cvxpy.Problem) -> tuple:
             else:
                 n_ineq += n_rows
 
-    # Merge fast-path arrays with slow-path COO
-    if all_rows:
-        merged_rows = np.concatenate(all_rows).tolist()
-        merged_cols = np.concatenate(all_cols).tolist()
-        merged_data = np.concatenate(all_data).tolist()
-        slow_coo.rows.extend(merged_rows)
-        slow_coo.cols.extend(merged_cols)
-        slow_coo.data.extend(merged_data)
-
     actual_rows = current_row
 
     # Step 4: Build on GPU
-    A_gpu = slow_coo.to_gpu_csc((actual_rows, n_vars))
-    b_full = np.concatenate(all_b) if all_b else np.zeros(0, dtype=np.float64)
+    A_gpu = A_coo.to_gpu_csc((actual_rows, n_vars))
+    b_full = np.concatenate(b_parts) if b_parts else np.zeros(0, dtype=np.float64)
     b_gpu = cup.asarray(b_full[:actual_rows])
     c_gpu = cup.asarray(c_vec)
 

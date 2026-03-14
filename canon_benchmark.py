@@ -496,63 +496,92 @@ FULL_SUITE = QUICK_SUITE + [
 # =============================================================================
 
 _ORACLE_CACHE_DIR = Path(__file__).parent / ".canon_oracle_cache"
-_oracle_cache: dict[str, dict[str, np.ndarray]] = {}
+_oracle_mem_cache: dict[str, dict] = {}
 
 
-def _to_dense(val) -> np.ndarray:
-    """Convert a possibly-sparse matrix to a flat float64 array."""
-    if sp.issparse(val):
-        val = val.toarray()
-    return np.asarray(val, dtype=np.float64).ravel()
+def _extract_verify_items(data: dict, is_dpp: bool) -> dict:
+    """Extract arrays/matrices to verify from problem data.
 
-
-def _load_oracle(problem_name: str) -> dict[str, np.ndarray] | None:
-    """Load cached oracle arrays from disk."""
-    if problem_name in _oracle_cache:
-        return _oracle_cache[problem_name]
-    cache_file = _ORACLE_CACHE_DIR / f"{problem_name}.npz"
-    if cache_file.exists():
-        data = dict(np.load(cache_file))
-        _oracle_cache[problem_name] = data
-        return data
-    return None
-
-
-def _save_oracle(problem_name: str, arrays: dict[str, np.ndarray]) -> None:
-    """Save oracle arrays to disk."""
-    _ORACLE_CACHE_DIR.mkdir(exist_ok=True)
-    _oracle_cache[problem_name] = arrays
-    np.savez(_ORACLE_CACHE_DIR / f"{problem_name}.npz", **arrays)
-
-
-def _extract_verify_arrays(data: dict, is_dpp: bool) -> dict[str, np.ndarray]:
-    """Extract the arrays to verify from problem data.
-
-    For non-DPP: A, b, c (the final matrices).
-    For DPP: param_prob.A and param_prob.q (the reusable tensors).
+    Keeps sparse matrices sparse to avoid massive dense allocations.
+    For non-DPP: A, b, c.  For DPP: param_prob.A and param_prob.q.
     """
-    arrays = {}
+    items = {}
     if is_dpp and "param_prob" in data and data["param_prob"] is not None:
         pp = data["param_prob"]
         if pp.A is not None:
-            arrays["pp_A"] = _to_dense(pp.A)
+            items["pp_A"] = sp.csc_array(pp.A) if sp.issparse(pp.A) else pp.A
         if pp.q is not None:
-            arrays["pp_q"] = _to_dense(pp.q)
+            items["pp_q"] = sp.csc_array(pp.q) if sp.issparse(pp.q) else pp.q
     else:
         for key in ["A", "b", "c"]:
             val = data.get(key)
             if val is not None:
-                arrays[key] = _to_dense(val)
-    return arrays
+                items[key] = sp.csc_array(val) if sp.issparse(val) else val
+    return items
+
+
+def _save_oracle_item(cache_dir: Path, name: str, key: str, val) -> None:
+    """Save a single oracle item (sparse or dense) to disk."""
+    path = cache_dir / f"{name}__{key}"
+    if sp.issparse(val):
+        sp.save_npz(str(path) + ".sparse.npz", sp.csc_array(val))
+    else:
+        np.save(str(path) + ".npy", np.asarray(val, dtype=np.float64))
+
+
+def _load_oracle_item(cache_dir: Path, name: str, key: str):
+    """Load a single oracle item from disk."""
+    sparse_path = cache_dir / f"{name}__{key}.sparse.npz"
+    dense_path = cache_dir / f"{name}__{key}.npy"
+    if sparse_path.exists():
+        return sp.load_npz(str(sparse_path))
+    elif dense_path.exists():
+        return np.load(str(dense_path))
+    return None
+
+
+def _load_oracle(problem_name: str) -> dict | None:
+    """Load cached oracle arrays from disk."""
+    if problem_name in _oracle_mem_cache:
+        return _oracle_mem_cache[problem_name]
+    # Check for marker file
+    marker = _ORACLE_CACHE_DIR / f"{problem_name}.keys"
+    if not marker.exists():
+        return None
+    keys = marker.read_text().strip().split("\n")
+    items = {}
+    for key in keys:
+        val = _load_oracle_item(_ORACLE_CACHE_DIR, problem_name, key)
+        if val is not None:
+            items[key] = val
+    _oracle_mem_cache[problem_name] = items
+    return items
+
+
+def _save_oracle(problem_name: str, items: dict) -> None:
+    """Save oracle arrays to disk (sparse-aware)."""
+    _ORACLE_CACHE_DIR.mkdir(exist_ok=True)
+    _oracle_mem_cache[problem_name] = items
+    for key, val in items.items():
+        _save_oracle_item(_ORACLE_CACHE_DIR, problem_name, key, val)
+    # Write keys marker
+    marker = _ORACLE_CACHE_DIR / f"{problem_name}.keys"
+    marker.write_text("\n".join(items.keys()))
 
 
 def _get_oracle(
     problem_factory: Callable, problem_name: str, is_dpp: bool,
-) -> dict[str, np.ndarray]:
-    """Get SCIPY oracle arrays, computing and caching if needed."""
-    cached = _load_oracle(problem_name)
-    if cached is not None:
-        return cached
+) -> dict:
+    """Get SCIPY oracle arrays, computing and caching if needed.
+
+    Non-DPP: cached to disk (deterministic across calls).
+    DPP: in-memory only (constraint IDs change between factory calls,
+    so we compute oracle on the same problem instance in _verify_against_oracle).
+    """
+    if not is_dpp:
+        cached = _load_oracle(problem_name)
+        if cached is not None:
+            return cached
 
     prob, init_params = problem_factory()
     if init_params is not None:
@@ -560,9 +589,37 @@ def _get_oracle(
         init_params()
     data, _, _ = prob.get_problem_data(cp.CLARABEL, canon_backend="SCIPY")
 
-    arrays = _extract_verify_arrays(data, is_dpp)
-    _save_oracle(problem_name, arrays)
-    return arrays
+    items = _extract_verify_items(data, is_dpp)
+    if not is_dpp:
+        _save_oracle(problem_name, items)
+
+    # For DPP, also return the problem so we can reuse it for the test backend
+    if is_dpp:
+        items["_prob"] = prob
+
+    return items
+
+
+def _allclose_sparse_or_dense(a, b, atol=1e-8, rtol=1e-6) -> tuple[bool, float]:
+    """Compare two arrays (sparse or dense) with tolerance. Returns (match, max_err)."""
+    if sp.issparse(a) and sp.issparse(b):
+        if a.shape != b.shape:
+            return False, float("inf")
+        diff = abs(a - b)
+        if diff.nnz == 0:
+            return True, 0.0
+        max_err = float(diff.max())
+        # Check allclose: |a-b| <= atol + rtol*|b|
+        passes = max_err <= atol + rtol * float(abs(b).max()) if b.nnz > 0 else max_err <= atol
+        return passes, max_err
+    # Fall back to dense
+    a_d = a.toarray().ravel() if sp.issparse(a) else np.asarray(a, dtype=float).ravel()
+    b_d = b.toarray().ravel() if sp.issparse(b) else np.asarray(b, dtype=float).ravel()
+    if a_d.shape != b_d.shape:
+        return False, float("inf")
+    passes = bool(np.allclose(a_d, b_d, atol=atol, rtol=rtol))
+    max_err = float(np.max(np.abs(a_d - b_d))) if a_d.size > 0 else 0.0
+    return passes, max_err
 
 
 def _verify_against_oracle(
@@ -571,13 +628,13 @@ def _verify_against_oracle(
     test_backend: str,
     is_dpp: bool = False,
 ) -> dict:
-    """Verify test backend output against cached SCIPY oracle arrays.
+    """Verify test backend output against cached SCIPY oracle.
 
-    On first call per problem, computes and caches SCIPY oracle arrays as .npz.
-    Subsequent calls only run the test backend and compare with allclose.
+    On first call per problem, computes and caches SCIPY oracle (sparse-aware).
+    Subsequent calls only run the test backend and compare.
 
     For non-DPP: compares A, b, c matrices.
-    For DPP: compares param_prob.A and param_prob.q tensors (parameter-independent).
+    For DPP: compares param_prob.A and param_prob.q tensors.
 
     Returns dict with 'pass', 'max_err', and 'mismatches' fields.
     """
@@ -587,10 +644,14 @@ def _verify_against_oracle(
         return {"pass": False, "max_err": float("inf"), "mismatches": [f"oracle: {e}"]}
 
     try:
-        prob, init_params = problem_factory()
-        if init_params is not None:
-            np.random.seed(12345)
-            init_params()
+        if is_dpp and "_prob" in oracle:
+            # Reuse same problem instance so constraint/aux IDs match
+            prob = oracle.pop("_prob")
+        else:
+            prob, init_params = problem_factory()
+            if init_params is not None:
+                np.random.seed(12345)
+                init_params()
         prob._cache = type(prob._cache)()
         test_data, _, _ = prob.get_problem_data(
             cp.CLARABEL, canon_backend=test_backend
@@ -598,39 +659,28 @@ def _verify_against_oracle(
     except Exception as e:
         return {"pass": False, "max_err": float("inf"), "mismatches": [f"test: {e}"]}
 
-    test_arrays = _extract_verify_arrays(test_data, is_dpp)
+    test_items = _extract_verify_items(test_data, is_dpp)
 
     mismatches = []
     max_err = 0.0
 
-    all_keys = set(oracle.keys()) | set(test_arrays.keys())
+    all_keys = set(oracle.keys()) | set(test_items.keys())
     for key in sorted(all_keys):
-        oracle_arr = oracle.get(key)
-        test_arr = test_arrays.get(key)
+        oracle_val = oracle.get(key)
+        test_val = test_items.get(key)
 
-        if oracle_arr is None and test_arr is None:
+        if oracle_val is None and test_val is None:
             continue
-        if oracle_arr is None or test_arr is None:
+        if oracle_val is None or test_val is None:
             mismatches.append(
-                f"{key}: missing in {'test' if test_arr is None else 'oracle'}"
+                f"{key}: missing in {'test' if test_val is None else 'oracle'}"
             )
             continue
 
-        if test_arr.shape != oracle_arr.shape:
-            mismatches.append(
-                f"{key}: shape mismatch {test_arr.shape} vs {oracle_arr.shape}"
-            )
-            continue
-
-        if not np.allclose(test_arr, oracle_arr, atol=1e-8, rtol=1e-6):
-            diff = np.abs(test_arr - oracle_arr)
-            err = float(np.max(diff))
-            max_err = max(max_err, err)
+        passes, err = _allclose_sparse_or_dense(test_val, oracle_val)
+        max_err = max(max_err, err)
+        if not passes:
             mismatches.append(f"{key}: max_err={err:.2e}")
-        else:
-            diff = np.abs(test_arr - oracle_arr)
-            if diff.size > 0:
-                max_err = max(max_err, float(np.max(diff)))
 
     return {
         "pass": len(mismatches) == 0,

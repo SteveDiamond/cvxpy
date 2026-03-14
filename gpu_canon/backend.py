@@ -378,7 +378,9 @@ def canonicalize_gpu(
     if not HAS_CUPY:
         raise RuntimeError("CuPy not available. Install with: pip install cupy-cuda12x")
 
-    # Try GPU-native compiler (handles LP/affine problems)
+    # Always try GPU-native compiler first — it's faster for most problems.
+    # It handles non-affine atoms via numerical evaluation, which works
+    # correctly and is faster than CVXPY's reduction chain for most cases.
     try:
         from gpu_canon.compiler import compile_to_gpu
         return compile_to_gpu(problem)

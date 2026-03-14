@@ -70,15 +70,28 @@ class COOBuilder:
                     self.cols.append(col_offset + int(j))
                     self.data.append(scale * float(mat[i, j]))
 
+    def to_scipy_csc(self, shape: tuple):
+        """Build scipy CSC on CPU from accumulated triplets."""
+        if not self.rows:
+            return sp.csc_matrix(shape, dtype=np.float64)
+        rows = np.array(self.rows, dtype=np.int32)
+        cols = np.array(self.cols, dtype=np.int32)
+        data = np.array(self.data, dtype=np.float64)
+        return sp.coo_matrix((data, (rows, cols)), shape=shape).tocsc()
+
     def to_gpu_csc(self, shape: tuple):
-        """Build CuPy CSC matrix from accumulated triplets."""
+        """Build CuPy CSC on GPU. Single bulk transfer of triplet arrays."""
         if not self.rows:
             return cusp.csc_matrix(shape, dtype=np.float64)
-        rows = cup.asarray(np.array(self.rows, dtype=np.int32))
-        cols = cup.asarray(np.array(self.cols, dtype=np.int32))
-        data = cup.asarray(np.array(self.data, dtype=np.float64))
-        coo = cusp.coo_matrix((data, (rows, cols)), shape=shape)
-        return coo.tocsc()
+        # Build CSC on CPU first (scipy is fast at COO→CSC),
+        # then transfer the 3 CSC arrays to GPU in one shot.
+        csc_cpu = self.to_scipy_csc(shape)
+        return cusp.csc_matrix(
+            (cup.asarray(csc_cpu.data),
+             cup.asarray(csc_cpu.indices),
+             cup.asarray(csc_cpu.indptr)),
+            shape=shape,
+        )
 
 
 def _to_dense_val(val):

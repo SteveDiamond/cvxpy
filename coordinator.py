@@ -53,7 +53,8 @@ def _experiment_hash(description: str) -> str:
 class Coordinator:
     """Solo research coordinator backed by Ensue shared memory."""
 
-    def __init__(self):
+    def __init__(self, namespace: str = NAMESPACE):
+        self.namespace = namespace
         self.api_key = _load_api_key()
         self._connected = None
         self._rpc_id = 0
@@ -63,7 +64,7 @@ class Coordinator:
         """Test connectivity to Ensue."""
         if self._connected is None:
             try:
-                self._call_tool("list_keys", {"prefix": f"{NAMESPACE}/best/%"})
+                self._call_tool("list_keys", {"prefix": f"{self.namespace}/best/%"})
                 self._connected = True
             except Exception:
                 self._connected = False
@@ -183,7 +184,7 @@ class Coordinator:
             benchmark_json = json.loads(benchmark_json)
 
         exp_hash = _experiment_hash(description)
-        key = f"{NAMESPACE}/results/{exp_hash}"
+        key = f"{self.namespace}/results/{exp_hash}"
 
         value = {
             "description": description,
@@ -207,7 +208,7 @@ class Coordinator:
         new_score = benchmark.get("geomean_ms", float("inf"))
 
         try:
-            current = self._get_memory(f"{NAMESPACE}/best/metadata")
+            current = self._get_memory(f"{self.namespace}/best/metadata")
             if current:
                 current_data = json.loads(current)
                 if current_data.get("geomean_ms", float("inf")) <= new_score:
@@ -221,14 +222,14 @@ class Coordinator:
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "benchmark": benchmark,
         }
-        self._set_memory(f"{NAMESPACE}/best/metadata", json.dumps(metadata))
+        self._set_memory(f"{self.namespace}/best/metadata", json.dumps(metadata))
         if git_diff:
-            self._set_memory(f"{NAMESPACE}/best/config", git_diff)
+            self._set_memory(f"{self.namespace}/best/config", git_diff)
         print(f"  ** New best! geomean={new_score:.2f}ms")
 
     def list_results(self) -> list[dict]:
         """List all published results."""
-        keys = self._list_keys(f"{NAMESPACE}/results/")
+        keys = self._list_keys(f"{self.namespace}/results/")
         results = []
         for key in keys:
             try:
@@ -253,7 +254,7 @@ class Coordinator:
             The insight key.
         """
         slug = _slugify(text)
-        key = f"{NAMESPACE}/insights/{slug}"
+        key = f"{self.namespace}/insights/{slug}"
 
         value = {
             "text": text,
@@ -266,7 +267,7 @@ class Coordinator:
 
     def list_insights(self) -> list[dict]:
         """List all insights."""
-        keys = self._list_keys(f"{NAMESPACE}/insights/")
+        keys = self._list_keys(f"{self.namespace}/insights/")
         insights = []
         for key in keys:
             try:
@@ -299,7 +300,7 @@ class Coordinator:
             The hypothesis key.
         """
         slug = _slugify(title)
-        key = f"{NAMESPACE}/hypotheses/{slug}"
+        key = f"{self.namespace}/hypotheses/{slug}"
 
         value = {
             "title": title,
@@ -314,7 +315,7 @@ class Coordinator:
 
     def list_hypotheses(self, status: str | None = None) -> list[dict]:
         """List hypotheses, optionally filtered by status."""
-        keys = self._list_keys(f"{NAMESPACE}/hypotheses/")
+        keys = self._list_keys(f"{self.namespace}/hypotheses/")
         hypotheses = []
         for key in keys:
             try:
@@ -334,10 +335,10 @@ class Coordinator:
     def pull_best(self) -> dict:
         """Get the current best configuration."""
         try:
-            val = self._get_memory(f"{NAMESPACE}/best/metadata")
+            val = self._get_memory(f"{self.namespace}/best/metadata")
             if val:
                 meta = json.loads(val)
-                diff_val = self._get_memory(f"{NAMESPACE}/best/config")
+                diff_val = self._get_memory(f"{self.namespace}/best/config")
                 meta["git_diff"] = diff_val or ""
                 return meta
         except Exception:
@@ -402,7 +403,7 @@ class Coordinator:
         Returns:
             List of matching items.
         """
-        matches = self._search(query, prefix=f"{NAMESPACE}/")
+        matches = self._search(query, prefix=f"{self.namespace}/")
         if matches:
             print(f"Found {len(matches)} matches for '{query}':")
             for m in matches[:10]:

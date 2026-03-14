@@ -1532,6 +1532,10 @@ class CooCanonBackend(PythonCanonBackend):
     parameter indices, avoiding the creation of huge stacked matrices.
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._identity_cache: dict[int, CooTensor] = {}
+
     def get_empty_view(self) -> CooTensorView:
         """Return an empty CooTensorView."""
         return CooTensorView.get_empty_view(
@@ -1539,14 +1543,12 @@ class CooCanonBackend(PythonCanonBackend):
             self.param_to_size, self.param_to_col, self.var_length
         )
 
-    def get_variable_tensor(self, shape: tuple, var_id: int) -> dict:
-        """
-        Create tensor for a variable.
-
-        Returns {var_id: {Constant.ID: tensor}} where tensor is identity-like.
-        """
-        size = int(np.prod(shape))
-        compact = CooTensor(
+    def _get_identity_tensor(self, size: int) -> CooTensor:
+        """Get a cached identity CooTensor for a given size."""
+        cached = self._identity_cache.get(size)
+        if cached is not None:
+            return cached
+        tensor = CooTensor(
             data=np.ones(size, dtype=np.float64),
             row=np.arange(size, dtype=np.int64),
             col=np.arange(size, dtype=np.int64),
@@ -1555,7 +1557,17 @@ class CooCanonBackend(PythonCanonBackend):
             n=size,
             param_size=1
         )
-        return {var_id: {Constant.ID.value: compact}}
+        self._identity_cache[size] = tensor
+        return tensor
+
+    def get_variable_tensor(self, shape: tuple, var_id: int) -> dict:
+        """
+        Create tensor for a variable.
+
+        Returns {var_id: {Constant.ID: tensor}} where tensor is identity-like.
+        """
+        size = int(np.prod(shape))
+        return {var_id: {Constant.ID.value: self._get_identity_tensor(size)}}
 
     def get_data_tensor(self, data: np.ndarray | sp.spmatrix) -> dict:
         """

@@ -159,6 +159,91 @@ def _fast_extract_affine(expr, var_id_to_col, n_vars):
     return None
 
 
+# ── Batch extraction for repeated constraint patterns ────────────────────
+
+def _try_batch_extract(constraints, var_id_to_col, n_vars):
+    """Try to batch-extract all constraints if they share the same pattern.
+
+    Handles: list of scalar constraints like a_i @ x <= b_i where all
+    a_i are 1D constants and b_i are scalars. Returns (A_matrix, b_vector)
+    or None if batch extraction isn't possible.
+    """
+    if len(constraints) < 2:
+        return None
+
+    # Check that all constraints have the same pattern:
+    # Inequality/NonNeg with expr = AddExpression(MulExpression(Const, Var), NegExpression(Const))
+    # and all reference the same variable
+    a_rows = []
+    b_vals = []
+    first_var_id = None
+
+    for constr in constraints:
+        expr = constr.expr
+
+        # Must be scalar constraint
+        if constr.size != 1:
+            return None
+
+        # Pattern: AddExpression with 2 args
+        if not isinstance(expr, AddExpression) or len(expr.args) != 2:
+            return None
+
+        arg0, arg1 = expr.args
+
+        # arg0 = MulExpression(Const/Param, Variable)
+        if not isinstance(arg0, MulExpression) or len(arg0.args) != 2:
+            return None
+        lhs, rhs = arg0.args
+        if not isinstance(lhs, (Constant, Parameter)) or not isinstance(rhs, Variable):
+            return None
+
+        # arg1 = NegExpression(Const/Param)
+        if not isinstance(arg1, NegExpression) or len(arg1.args) != 1:
+            return None
+        neg_arg = arg1.args[0]
+        if not isinstance(neg_arg, (Constant, Parameter)):
+            return None
+
+        # Same variable for all constraints
+        if first_var_id is None:
+            first_var_id = rhs.id
+        elif rhs.id != first_var_id:
+            return None
+
+        # Extract data directly
+        a_val = lhs.value
+        if sp.issparse(a_val):
+            a_val = a_val.toarray()
+        a_rows.append(np.asarray(a_val, dtype=np.float64).ravel())
+
+        b_val = neg_arg.value
+        if sp.issparse(b_val):
+            b_val = b_val.toarray()
+        b_vals.append(float(np.asarray(b_val).ravel()[0]))
+
+    # Build A matrix and b vector
+    col_start = var_id_to_col[first_var_id]
+    n_rows = len(a_rows)
+    n_cols_local = len(a_rows[0])
+
+    A_local = np.vstack(a_rows)  # (n_rows, n_cols_local)
+
+    # Embed into full-size sparse matrix
+    if col_start == 0 and n_cols_local == n_vars:
+        A = sp.csc_matrix(A_local)
+    else:
+        # Need to place A_local at the right column offset
+        nz_rows, nz_cols = np.nonzero(A_local)
+        A = sp.coo_matrix(
+            (A_local[nz_rows, nz_cols], (nz_rows, nz_cols + col_start)),
+            shape=(n_rows, n_vars),
+        ).tocsc()
+
+    b = np.array(b_vals, dtype=np.float64)
+    return A, b
+
+
 # ── Slow path: recursive affine extraction ───────────────────────────────
 
 class COOBuilder:
@@ -373,7 +458,7 @@ def compile_to_gpu(problem: cvxpy.Problem) -> tuple:
     if not is_minimize:
         c_vec = -c_vec
 
-    # Step 3: Constraints — always use COO builder, with fast extraction
+    # Step 3: Constraints
     eq_constraints = [c for c in problem.constraints if isinstance(c, (Zero, Equality))]
     ineq_constraints = [c for c in problem.constraints if not isinstance(c, (Zero, Equality))]
 
@@ -384,6 +469,27 @@ def compile_to_gpu(problem: cvxpy.Problem) -> tuple:
     b_parts = []
 
     for constr_list, cone_type in [(eq_constraints, "eq"), (ineq_constraints, "ineq")]:
+        # Try batch extraction for scalar constraints with same pattern
+        batch_result = _try_batch_extract(constr_list, var_id_to_col, n_vars)
+        if batch_result is not None:
+            A_batch, b_batch = batch_result
+            # _try_batch_extract returns A, b such that the constraint is A@x <= b
+            # (for Inequality) or A@x == b (for Equality).
+            # In Clarabel form: A@x + s = b (s >= 0 for ineq, s = 0 for eq)
+            if sp.issparse(A_batch):
+                coo_batch = A_batch.tocoo()
+            else:
+                coo_batch = sp.coo_matrix(A_batch)
+            n_rows = A_batch.shape[0]
+            A_coo.add_block(current_row, 0, coo_batch, 1.0)
+            b_parts.append(b_batch)
+            current_row += n_rows
+            if cone_type == "eq":
+                n_eq += n_rows
+            else:
+                n_ineq += n_rows
+            continue
+
         for constr in constr_list:
             n_rows = constr.size
             b_local = np.zeros(n_rows, dtype=np.float64)

@@ -55,6 +55,9 @@ class ProblemResult:
     gpu_std_ms: float = 0.0
     gpu_transfer_ms: float = 0.0  # host→device transfer time (for v0)
     speedup: float = 0.0
+    trace_first_ms: float = 0.0   # trace-compile: first call (trace + cache)
+    trace_replay_ms: float = 0.0  # trace-compile: cached replay
+    trace_speedup: float = 0.0    # trace replay vs CPU
     correct: bool = True
     error: str = ""
 
@@ -360,6 +363,92 @@ def run_suite(
     return results
 
 
+# ── Trace-compile timing ──────────────────────────────────────────────────────
+
+def _time_trace_compile(
+    problem_factory: Callable, warmup: int, iterations: int
+) -> dict:
+    """Time trace-compile: first call (trace) vs subsequent (replay)."""
+    if not HAS_GPU:
+        return {"trace_first_ms": 0, "trace_replay_ms": 0, "trace_speedup": 0}
+
+    from gpu_canon.backend import canonicalize_gpu_traced, reset_trace_cache
+
+    # Fresh cache for each problem
+    reset_trace_cache()
+
+    # First call: trace + cache (cold)
+    prob = problem_factory()
+    cupy.cuda.Device(0).synchronize()
+    start = time.perf_counter()
+    try:
+        canonicalize_gpu_traced(prob)
+    except Exception as e:
+        return {"trace_first_ms": 0, "trace_replay_ms": 0,
+                "trace_speedup": 0, "error": str(e)}
+    cupy.cuda.Device(0).synchronize()
+    trace_first = (time.perf_counter() - start) * 1000
+
+    # Subsequent calls: replay (warm)
+    replay_times = []
+    for i in range(warmup + iterations):
+        prob = problem_factory()
+        gc.collect()
+        cupy.cuda.Device(0).synchronize()
+        start = time.perf_counter()
+        try:
+            canonicalize_gpu_traced(prob)
+        except Exception:
+            break
+        cupy.cuda.Device(0).synchronize()
+        elapsed = (time.perf_counter() - start) * 1000
+        if i >= warmup:
+            replay_times.append(elapsed)
+
+    replay_mean = statistics.mean(replay_times) if replay_times else 0
+    reset_trace_cache()
+
+    return {
+        "trace_first_ms": round(trace_first, 3),
+        "trace_replay_ms": round(replay_mean, 3),
+        "trace_speedup": 0,  # filled in by caller
+    }
+
+
+def run_trace_suite(
+    suite: list[tuple[str, Callable, int]],
+    verbose: bool = True,
+    warmup: int = 2,
+) -> list[dict]:
+    """Run trace-compile benchmarks for each problem."""
+    results = []
+
+    for name, factory, iters in suite:
+        if verbose:
+            print(f"  {name:35s} ", end="", file=sys.stderr, flush=True)
+
+        # CPU baseline for speedup calculation
+        cpu_times, _ = _time_cpu(factory, warmup, iters)
+        cpu_mean = statistics.mean(cpu_times) if cpu_times else 0
+
+        tr = _time_trace_compile(factory, warmup, iters)
+        tr["name"] = name
+        if cpu_mean > 0 and tr["trace_replay_ms"] > 0:
+            tr["trace_speedup"] = round(cpu_mean / tr["trace_replay_ms"], 2)
+
+        results.append(tr)
+
+        if verbose:
+            print(
+                f"first={tr['trace_first_ms']:7.2f}ms  "
+                f"replay={tr['trace_replay_ms']:7.2f}ms  "
+                f"speedup={tr['trace_speedup']:.2f}x",
+                file=sys.stderr,
+            )
+
+    return results
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -368,6 +457,8 @@ def main():
     parser.add_argument("--json", action="store_true", help="Output JSON to stdout")
     parser.add_argument("--quiet", action="store_true", help="Suppress stderr")
     parser.add_argument("--verbose", action="store_true", help="Extra detail")
+    parser.add_argument("--trace", action="store_true",
+                        help="Include trace-compile timing")
     args = parser.parse_args()
 
     suite = QUICK_SUITE if args.quick else FULL_SUITE
@@ -380,6 +471,19 @@ def main():
               f"({len(suite)} problems)\n", file=sys.stderr)
 
     results = run_suite(suite, verbose=verbose)
+
+    # Run trace-compile benchmark if requested
+    if args.trace:
+        if verbose:
+            print("\n── Trace-compile benchmark ──", file=sys.stderr)
+        trace_results = run_trace_suite(suite, verbose=verbose)
+        # Merge trace results into main results
+        for tr in trace_results:
+            for pr in results.problems:
+                if pr.name == tr["name"]:
+                    pr.trace_first_ms = tr["trace_first_ms"]
+                    pr.trace_replay_ms = tr["trace_replay_ms"]
+                    pr.trace_speedup = tr["trace_speedup"]
 
     if args.json:
         print(json.dumps(results.to_dict(), indent=2, default=str))

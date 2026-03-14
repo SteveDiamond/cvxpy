@@ -390,3 +390,44 @@ def canonicalize_gpu(
     # Fallback: CVXPY reduction chain + GPU transfer
     compiled = CompiledProgram(problem, solver)
     return compiled.canonicalize()
+
+
+# ── Trace-compile path ────────────────────────────────────────────────────────
+
+# Module-level trace cache (shared across calls)
+_trace_cache = None
+
+
+def _get_trace_cache():
+    """Get or create the module-level trace cache."""
+    global _trace_cache
+    if _trace_cache is None:
+        from gpu_canon.trace_cache import TraceCache
+        _trace_cache = TraceCache()
+    return _trace_cache
+
+
+def canonicalize_gpu_traced(
+    problem: cvxpy.Problem,
+    solver: str = "CLARABEL",
+) -> tuple[Any, Any, Any, dict]:
+    """GPU canonicalization via trace-compile.
+
+    First call: traces CVXPY's numpy ops, caches the trace, returns GPU result.
+    Subsequent calls with same problem structure: replays cached trace on GPU.
+
+    This handles ANY problem CVXPY handles — no reimplementation needed.
+    """
+    if not HAS_CUPY:
+        raise RuntimeError("CuPy not available. Install with: pip install cupy-cuda12x")
+
+    cache = _get_trace_cache()
+    return cache.canonicalize(problem, solver, on_gpu=True)
+
+
+def reset_trace_cache():
+    """Reset the module-level trace cache."""
+    global _trace_cache
+    if _trace_cache is not None:
+        _trace_cache.clear()
+    _trace_cache = None

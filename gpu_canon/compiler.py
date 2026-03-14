@@ -311,13 +311,22 @@ class COOBuilder:
     def to_gpu_csc(self, shape: tuple):
         if not self.rows:
             return cusp.csc_matrix(shape, dtype=np.float64)
-        csc_cpu = self.to_scipy_csc(shape)
-        return cusp.csc_matrix(
-            (cup.asarray(csc_cpu.data),
-             cup.asarray(csc_cpu.indices),
-             cup.asarray(csc_cpu.indptr)),
-            shape=shape,
-        )
+        nnz = len(self.rows)
+        if nnz < 100_000:
+            # Small: scipy COO→CSC on CPU is fast, transfer 3 CSC arrays
+            csc_cpu = self.to_scipy_csc(shape)
+            return cusp.csc_matrix(
+                (cup.asarray(csc_cpu.data),
+                 cup.asarray(csc_cpu.indices),
+                 cup.asarray(csc_cpu.indptr)),
+                shape=shape,
+            )
+        else:
+            # Large: transfer COO arrays to GPU, build CSC there
+            rows = cup.asarray(np.array(self.rows, dtype=np.int32))
+            cols = cup.asarray(np.array(self.cols, dtype=np.int32))
+            data = cup.asarray(np.array(self.data, dtype=np.float64))
+            return cusp.coo_matrix((data, (rows, cols)), shape=shape).tocsc()
 
 
 def _extract_affine_coeffs(expr, var_id_to_col, n_vars, coo, b_vec, row_offset, scale=1.0):

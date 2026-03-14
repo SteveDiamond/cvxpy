@@ -1,119 +1,61 @@
-# CVXPY Canonicalization Optimization — Agent Protocol
+# CVXPY Canon Optimizer — Agent Protocol v2
 
-## Goal
-Make CVXPY canonicalization (Problem → solver-ready matrices) as fast as possible.
-Metric: geometric mean of `canon_benchmark.py` timings (lower = better).
-
-## Setup (run once per session)
+## SETUP
 ```bash
-source .venv/bin/activate
-export ENSUE_API_KEY=$(cat .autoresearch-key)
+source .venv/bin/activate && export ENSUE_API_KEY=$(cat .autoresearch-key)
 ```
 
-## Agent Loop
-
-### 1. RECALL
+## PHASE 1: RECALL (mandatory)
 ```python
-from coordinator import Coordinator
-coord = Coordinator()
-coord.analyze()                       # Full summary
-coord.ask("recent insights")          # Semantic search
-best = coord.pull_best()              # Current best config + diff
-hypotheses = coord.list_hypotheses(status="open")  # What to try next
+from coordinator import Coordinator; coord = Coordinator()
+coord.analyze()                          # summary of all work
+coord.list_hypotheses(status="open")     # what to try
 ```
+Do NOT load source files into context yet.
 
-### 2. THINK
-- Pick the highest-priority open hypothesis, OR
-- Identify a new optimization target from profiling/code reading
-- Focus on one change at a time — keep diffs minimal
+## PHASE 2: CHECK PRIOR ART (mandatory)
+```python
+coord.check_tried("description of planned experiment")
+```
+If similar experiment found with conclusive result → skip, pick another.
 
-### 3. IMPLEMENT
-- Edit files in `cvxpy/lin_ops/backends/` or related hot paths
-- Keep changes focused and reversible
-- Run `pytest cvxpy/tests/ -x -q` to verify correctness
+## PHASE 3: THINK
+Pick highest-priority open hypothesis OR propose a radical new idea.
+Read ONLY the files you will modify.
 
-### 4. BENCHMARK
+**Correctness oracles**: `get_problem_data(solver, canon_backend='SCIPY')` gives
+ground-truth A, b, c matrices. ANY approach producing identical output is valid.
+
+Think beyond incremental: new data structures, JIT, lazy eval, caching, fusion…
+
+## PHASE 4: IMPLEMENT + TEST
+Edit files. Run:
 ```bash
-# Quick check
-python canon_benchmark.py --quick --json
-
-# Full benchmark (before publishing)
-python canon_benchmark.py --all-backends --json > /tmp/bench_result.json
+pytest cvxpy/tests/ -x -q
 ```
 
-Verify:
-- All problems pass (no errors)
-- Check geomean_ms vs baseline
+## PHASE 5: BENCHMARK + VERIFY (use /bench skill)
+```bash
+python canon_benchmark.py --quick --json --verify           # fast check
+python canon_benchmark.py --all-backends --json --trace --verify  # full run
+```
 
-### 5. PUBLISH
+## PHASE 6: PUBLISH (mandatory, even for failures)
 ```python
-import json, subprocess
-
-# Get the diff
-diff = subprocess.check_output(["git", "diff"]).decode()
-
-# Load results
-with open("/tmp/bench_result.json") as f:
-    bench = json.load(f)
-
-# Determine status
-status = "keep" if bench["geomean_ms"] < best["geomean_ms"] else "discard"
-
-coord.publish_result(
-    "Description of what was changed",
-    bench,
-    diff,
-    status
-)
-
-# Record what you learned
-coord.post_insight("What we learned from this experiment")
-
-# Propose next steps
-coord.publish_hypothesis(
-    "Next thing to try",
-    "Detailed description of the hypothesis",
-    priority=2  # 1=high, 2=medium, 3=low
-)
-
-# Update hypothesis status if you tested one
-coord.publish_hypothesis("Title of tested hypothesis", "...", status="tested")
+coord.publish_result(description, bench_json, git_diff, "keep"|"discard"|"error")
+coord.post_insight("what we learned")          # embed for future search
+coord.publish_hypothesis("next idea", ...)     # seed future sessions
+```
+If `--trace` revealed hot functions:
+```python
+coord.publish_trace(problem_name, backend, trace_data)
 ```
 
-### 6. REPEAT
-Go back to step 1.
-
-## Key Files
-
-| File | Role |
-|------|------|
-| `cvxpy/lin_ops/backends/base.py` | `build_matrix()`, `process_constraint()`, `flatten_tensor()` |
-| `cvxpy/lin_ops/backends/coo_backend.py` | COO backend — best for DPP problems |
-| `cvxpy/lin_ops/backends/scipy_backend.py` | SciPy backend — reference implementation |
-| `cvxpy/cvxcore/python/canonInterface.py` | CPP backend entry point |
-| `cvxpy/reductions/dcp2cone/cone_matrix_stuffing.py` | Canonicalization orchestrator |
-| `coordinator.py` | Ensue research coordinator |
-| `canon_benchmark.py` | Standardized benchmark harness |
-
-## Optimization Targets (by priority)
-
-### P1 — Hot Path
-1. **Parallelize `build_matrix()` constraint loop** — constraints are independent
-2. **Optimize `mul` in COO backend** — DPP hot path
-3. **Speed up `flatten_tensor()` COO→CSC** — called on every problem
-
-### P2 — Medium Impact
-4. **`CooTensor.select_rows()` skip argsort** for pre-sorted inputs
-5. **Pre-allocate arrays in `TensorRepresentation.combine()`**
-6. **int32 indices** when dimensions fit (saves memory bandwidth)
-
-### P3 — Exploratory
-7. **LinOp fusion**: `neg(mul(...))` → single op
-8. **Smart backend auto-selection** based on problem structure
-9. **Rust backend completion** for tree traversal
-
-## Rules
-- One optimization per experiment — isolate effects
-- Always verify correctness before publishing
-- Record negative results too (status="discard") — they prevent re-trying
-- Keep git working tree clean between experiments (stash or revert failed attempts)
+## RULES
+1. ONE change per experiment — isolate effects
+2. ALWAYS `--verify` — never publish unverified results
+3. ALWAYS publish — negative results prevent re-trying
+4. Do NOT load files you aren't editing — use Ensue for context
+5. Existing backends are oracles — matching A,b,c = correct
+6. Think creatively — radical approaches welcome if oracle-verified
+7. Traces go to Ensue — if `--trace` reveals a hot function, `coord.publish_trace()`

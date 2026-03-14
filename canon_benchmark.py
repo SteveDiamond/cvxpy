@@ -23,6 +23,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, field
 from io import StringIO
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
@@ -54,6 +55,7 @@ class ProblemResult:
     min_ms: float = 0.0
     times_ms: list = field(default_factory=list)
     trace: list = field(default_factory=list)
+    verification: dict = field(default_factory=dict)
     error: str = ""
 
 
@@ -287,11 +289,22 @@ def make_scalar_grid(n: int) -> Callable:
     return factory
 
 
+def _fixed_var(shape=(), id_base=0, idx=0, **kwargs):
+    """Create a Variable with a deterministic ID for reproducible benchmarks."""
+    return cp.Variable(shape, var_id=id_base + idx, **kwargs)
+
+
+def _fixed_param(shape=(), id_base=0, idx=0, **kwargs):
+    """Create a Parameter with a deterministic ID for reproducible benchmarks."""
+    return cp.Parameter(shape, id=id_base + 10000 + idx, **kwargs)
+
+
 def make_dpp_scalar_lp(n: int) -> Callable:
     """N scalar vars with parametric scalar constraints. DPP scalarized tree."""
+    ID = 100000
     def factory():
-        xs = [cp.Variable() for _ in range(n)]
-        ps = [cp.Parameter(nonneg=True) for _ in range(n)]
+        xs = [_fixed_var(id_base=ID, idx=i) for i in range(n)]
+        ps = [_fixed_param(nonneg=True, id_base=ID, idx=i) for i in range(n)]
         cons = [ps[i] * xs[i] <= 1 for i in range(n)] + [xs[i] >= -1 for i in range(n)]
         obj = cp.Minimize(sum(xs))
         prob = cp.Problem(obj, cons)
@@ -307,9 +320,10 @@ def make_dpp_scalar_lp(n: int) -> Callable:
 
 def make_dpp_param_lp(n_vars: int, n_constraints: int) -> Callable:
     """DPP parametrized LP: hot path is mul with parameter."""
+    ID = 200000
     def factory():
-        x = cp.Variable(n_vars)
-        A_param = cp.Parameter((n_constraints, n_vars))
+        x = _fixed_var(n_vars, id_base=ID, idx=0)
+        A_param = _fixed_param((n_constraints, n_vars), id_base=ID, idx=0)
         b = np.random.randn(n_constraints) + 10
         c = np.random.randn(n_vars)
         prob = cp.Problem(cp.Minimize(c @ x), [A_param @ x <= b, x >= 0])
@@ -324,10 +338,11 @@ def make_dpp_param_lp(n_vars: int, n_constraints: int) -> Callable:
 
 def make_dpp_lasso(n: int, m: int) -> Callable:
     """DPP LASSO: hot path is mul_elem parametric."""
+    ID = 300000
     def factory():
-        x = cp.Variable(n)
-        A_param = cp.Parameter((m, n))
-        b_param = cp.Parameter(m)
+        x = _fixed_var(n, id_base=ID, idx=0)
+        A_param = _fixed_param((m, n), id_base=ID, idx=0)
+        b_param = _fixed_param(m, id_base=ID, idx=1)
         obj = cp.Minimize(0.5 * cp.sum_squares(A_param @ x - b_param) + 0.1 * cp.norm(x, 1))
         prob = cp.Problem(obj)
 
@@ -342,10 +357,11 @@ def make_dpp_lasso(n: int, m: int) -> Callable:
 
 def make_dpp_multi_param(n_vars: int, n_constraints: int) -> Callable:
     """DPP multi-parameter: multiple mul ops."""
+    ID = 400000
     def factory():
-        x = cp.Variable(n_vars)
-        A1 = cp.Parameter((n_constraints // 2, n_vars))
-        A2 = cp.Parameter((n_constraints // 2, n_vars))
+        x = _fixed_var(n_vars, id_base=ID, idx=0)
+        A1 = _fixed_param((n_constraints // 2, n_vars), id_base=ID, idx=0)
+        A2 = _fixed_param((n_constraints // 2, n_vars), id_base=ID, idx=1)
         b1 = np.random.randn(n_constraints // 2) + 10
         b2 = np.random.randn(n_constraints // 2) + 10
         c = np.random.randn(n_vars)
@@ -365,9 +381,10 @@ def make_dpp_multi_param(n_vars: int, n_constraints: int) -> Callable:
 
 def make_dpp_giant_lp(n_vars: int, n_constraints: int) -> Callable:
     """DPP with huge single parameter matrix. Tests O(nnz) vs O(param_size*rows)."""
+    ID = 500000
     def factory():
-        x = cp.Variable(n_vars)
-        A_param = cp.Parameter((n_constraints, n_vars))
+        x = _fixed_var(n_vars, id_base=ID, idx=0)
+        A_param = _fixed_param((n_constraints, n_vars), id_base=ID, idx=0)
         b = np.random.randn(n_constraints) + 10
         c = np.random.randn(n_vars)
         prob = cp.Problem(cp.Minimize(c @ x), [A_param @ x <= b, x >= 0])
@@ -382,11 +399,12 @@ def make_dpp_giant_lp(n_vars: int, n_constraints: int) -> Callable:
 
 def make_dpp_3_matrices(n: int) -> Callable:
     """DPP with 3 large parameter matrices (3*n*n total params)."""
+    ID = 600000
     def factory():
-        x = cp.Variable(n)
-        A1 = cp.Parameter((n, n))
-        A2 = cp.Parameter((n, n))
-        A3 = cp.Parameter((n, n))
+        x = _fixed_var(n, id_base=ID, idx=0)
+        A1 = _fixed_param((n, n), id_base=ID, idx=0)
+        A2 = _fixed_param((n, n), id_base=ID, idx=1)
+        A3 = _fixed_param((n, n), id_base=ID, idx=2)
         b1 = np.random.randn(n) + 10
         b2 = np.random.randn(n) + 10
         b3 = np.random.randn(n) + 10
@@ -408,9 +426,10 @@ def make_dpp_3_matrices(n: int) -> Callable:
 
 def make_dpp_many_param_objs(n_params: int, n_vars: int = 100) -> Callable:
     """DPP with many separate Parameter objects (tests param object overhead)."""
+    ID = 700000
     def factory():
-        x = cp.Variable(n_vars)
-        params = [cp.Parameter(n_vars) for _ in range(n_params)]
+        x = _fixed_var(n_vars, id_base=ID, idx=0)
+        params = [_fixed_param(n_vars, id_base=ID, idx=i) for i in range(n_params)]
         cons = [p @ x <= 1 for p in params]
         prob = cp.Problem(cp.Minimize(cp.sum(x)), cons)
 
@@ -476,11 +495,156 @@ FULL_SUITE = QUICK_SUITE + [
 # Runner
 # =============================================================================
 
+_ORACLE_CACHE_DIR = Path(__file__).parent / ".canon_oracle_cache"
+_oracle_cache: dict[str, dict[str, np.ndarray]] = {}
+
+
+def _to_dense(val) -> np.ndarray:
+    """Convert a possibly-sparse matrix to a flat float64 array."""
+    if sp.issparse(val):
+        val = val.toarray()
+    return np.asarray(val, dtype=np.float64).ravel()
+
+
+def _load_oracle(problem_name: str) -> dict[str, np.ndarray] | None:
+    """Load cached oracle arrays from disk."""
+    if problem_name in _oracle_cache:
+        return _oracle_cache[problem_name]
+    cache_file = _ORACLE_CACHE_DIR / f"{problem_name}.npz"
+    if cache_file.exists():
+        data = dict(np.load(cache_file))
+        _oracle_cache[problem_name] = data
+        return data
+    return None
+
+
+def _save_oracle(problem_name: str, arrays: dict[str, np.ndarray]) -> None:
+    """Save oracle arrays to disk."""
+    _ORACLE_CACHE_DIR.mkdir(exist_ok=True)
+    _oracle_cache[problem_name] = arrays
+    np.savez(_ORACLE_CACHE_DIR / f"{problem_name}.npz", **arrays)
+
+
+def _extract_verify_arrays(data: dict, is_dpp: bool) -> dict[str, np.ndarray]:
+    """Extract the arrays to verify from problem data.
+
+    For non-DPP: A, b, c (the final matrices).
+    For DPP: param_prob.A and param_prob.q (the reusable tensors).
+    """
+    arrays = {}
+    if is_dpp and "param_prob" in data and data["param_prob"] is not None:
+        pp = data["param_prob"]
+        if pp.A is not None:
+            arrays["pp_A"] = _to_dense(pp.A)
+        if pp.q is not None:
+            arrays["pp_q"] = _to_dense(pp.q)
+    else:
+        for key in ["A", "b", "c"]:
+            val = data.get(key)
+            if val is not None:
+                arrays[key] = _to_dense(val)
+    return arrays
+
+
+def _get_oracle(
+    problem_factory: Callable, problem_name: str, is_dpp: bool,
+) -> dict[str, np.ndarray]:
+    """Get SCIPY oracle arrays, computing and caching if needed."""
+    cached = _load_oracle(problem_name)
+    if cached is not None:
+        return cached
+
+    prob, init_params = problem_factory()
+    if init_params is not None:
+        np.random.seed(12345)
+        init_params()
+    data, _, _ = prob.get_problem_data(cp.CLARABEL, canon_backend="SCIPY")
+
+    arrays = _extract_verify_arrays(data, is_dpp)
+    _save_oracle(problem_name, arrays)
+    return arrays
+
+
+def _verify_against_oracle(
+    problem_factory: Callable,
+    problem_name: str,
+    test_backend: str,
+    is_dpp: bool = False,
+) -> dict:
+    """Verify test backend output against cached SCIPY oracle arrays.
+
+    On first call per problem, computes and caches SCIPY oracle arrays as .npz.
+    Subsequent calls only run the test backend and compare with allclose.
+
+    For non-DPP: compares A, b, c matrices.
+    For DPP: compares param_prob.A and param_prob.q tensors (parameter-independent).
+
+    Returns dict with 'pass', 'max_err', and 'mismatches' fields.
+    """
+    try:
+        oracle = _get_oracle(problem_factory, problem_name, is_dpp)
+    except Exception as e:
+        return {"pass": False, "max_err": float("inf"), "mismatches": [f"oracle: {e}"]}
+
+    try:
+        prob, init_params = problem_factory()
+        if init_params is not None:
+            np.random.seed(12345)
+            init_params()
+        prob._cache = type(prob._cache)()
+        test_data, _, _ = prob.get_problem_data(
+            cp.CLARABEL, canon_backend=test_backend
+        )
+    except Exception as e:
+        return {"pass": False, "max_err": float("inf"), "mismatches": [f"test: {e}"]}
+
+    test_arrays = _extract_verify_arrays(test_data, is_dpp)
+
+    mismatches = []
+    max_err = 0.0
+
+    all_keys = set(oracle.keys()) | set(test_arrays.keys())
+    for key in sorted(all_keys):
+        oracle_arr = oracle.get(key)
+        test_arr = test_arrays.get(key)
+
+        if oracle_arr is None and test_arr is None:
+            continue
+        if oracle_arr is None or test_arr is None:
+            mismatches.append(
+                f"{key}: missing in {'test' if test_arr is None else 'oracle'}"
+            )
+            continue
+
+        if test_arr.shape != oracle_arr.shape:
+            mismatches.append(
+                f"{key}: shape mismatch {test_arr.shape} vs {oracle_arr.shape}"
+            )
+            continue
+
+        if not np.allclose(test_arr, oracle_arr, atol=1e-8, rtol=1e-6):
+            diff = np.abs(test_arr - oracle_arr)
+            err = float(np.max(diff))
+            max_err = max(max_err, err)
+            mismatches.append(f"{key}: max_err={err:.2e}")
+        else:
+            diff = np.abs(test_arr - oracle_arr)
+            if diff.size > 0:
+                max_err = max(max_err, float(np.max(diff)))
+
+    return {
+        "pass": len(mismatches) == 0,
+        "max_err": round(max_err, 12),
+        "mismatches": mismatches,
+    }
+
+
 def run_suite(
     suite: list[tuple[str, Callable, int]],
     backend: str,
     verbose: bool = True,
     trace: bool = False,
+    verify: bool = False,
 ) -> BenchmarkSuite:
     """Run the benchmark suite for a single backend."""
     results = BenchmarkSuite(
@@ -499,14 +663,32 @@ def run_suite(
                 print(f"  {name:35s} ERROR: {result.error[:50]}", file=sys.stderr)
         else:
             valid_means.append(result.mean_ms)
-            if verbose:
+
+            # Verify against SCIPY oracle
+            if verify and backend != "SCIPY":
+                vresult = _verify_against_oracle(
+                    factory, name, backend, is_dpp=result.is_dpp,
+                )
+                result.verification = vresult
+                vtag = " PASS" if vresult["pass"] else " FAIL"
+                if verbose:
+                    print(f"  {name:35s} {result.mean_ms:8.2f}ms "
+                          f"(±{result.std_ms:5.2f}){vtag}", file=sys.stderr)
+                    if not vresult["pass"]:
+                        for mm in vresult["mismatches"]:
+                            print(f"    VERIFY FAIL: {mm}", file=sys.stderr)
+                elif not vresult["pass"] and verbose:
+                    for mm in vresult["mismatches"]:
+                        print(f"    VERIFY FAIL: {mm}", file=sys.stderr)
+            elif verbose:
                 dpp_tag = " [DPP]" if result.is_dpp else ""
                 print(f"  {name:35s} {result.mean_ms:8.2f}ms "
                       f"(±{result.std_ms:5.2f}){dpp_tag}", file=sys.stderr)
-                if trace and result.trace:
-                    for t in result.trace[:5]:
-                        print(f"    {t['pct']:5.1f}%  {t['tottime_ms']:7.1f}ms  "
-                              f"{t['calls']:>6d}x  {t['func']}", file=sys.stderr)
+
+            if verbose and trace and result.trace:
+                for t in result.trace[:5]:
+                    print(f"    {t['pct']:5.1f}%  {t['tottime_ms']:7.1f}ms  "
+                          f"{t['calls']:>6d}x  {t['func']}", file=sys.stderr)
 
         results.problems.append(result)
 
@@ -526,6 +708,7 @@ def run_all_backends(
     backends: list[str],
     verbose: bool = True,
     trace: bool = False,
+    verify: bool = False,
 ) -> dict[str, BenchmarkSuite]:
     """Run suite across all backends and return combined results."""
     all_results = {}
@@ -534,7 +717,9 @@ def run_all_backends(
             print(f"\n{'=' * 60}", file=sys.stderr)
             print(f"Backend: {backend}", file=sys.stderr)
             print(f"{'=' * 60}", file=sys.stderr)
-        all_results[backend] = run_suite(suite, backend, verbose=verbose, trace=trace)
+        all_results[backend] = run_suite(
+            suite, backend, verbose=verbose, trace=trace, verify=verify,
+        )
 
     # Print comparison
     if verbose and len(backends) > 1:
@@ -581,18 +766,34 @@ def main():
     parser.add_argument("--quiet", action="store_true", help="Suppress stderr output")
     parser.add_argument("--trace", action="store_true",
                         help="Capture execution trace (cProfile) for each problem")
+    parser.add_argument("--verify", action="store_true",
+                        help="Verify output matrices against SCIPY oracle")
+    parser.add_argument("--rebuild-cache", action="store_true",
+                        help="Rebuild SCIPY oracle cache (use after changing problem factories)")
     args = parser.parse_args()
+
+    if args.rebuild_cache:
+        import shutil
+        if _ORACLE_CACHE_DIR.exists():
+            shutil.rmtree(_ORACLE_CACHE_DIR)
+            print("Oracle cache cleared.", file=sys.stderr)
+        else:
+            print("No oracle cache to clear.", file=sys.stderr)
 
     suite = QUICK_SUITE if args.quick else FULL_SUITE
     verbose = not args.quiet
 
     if args.all_backends:
         backends = ["CPP", "SCIPY", "COO"]
-        all_results = run_all_backends(suite, backends, verbose=verbose, trace=args.trace)
+        all_results = run_all_backends(
+            suite, backends, verbose=verbose, trace=args.trace, verify=args.verify,
+        )
         output = combine_results(all_results)
     else:
         backend = args.backend or "CPP"
-        result = run_suite(suite, backend, verbose=verbose, trace=args.trace)
+        result = run_suite(
+            suite, backend, verbose=verbose, trace=args.trace, verify=args.verify,
+        )
         output = result.to_dict()
         output["geomean_ms"] = result.geomean_ms
 

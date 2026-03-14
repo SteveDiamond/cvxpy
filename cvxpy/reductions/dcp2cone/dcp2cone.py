@@ -93,17 +93,18 @@ class Dcp2Cone(Canonicalization):
               expr.args[0].objective.expr, False)
             for constr in expr.args[0].constraints:
                 canon_constr, aux_constr = self.canonicalize_tree(constr, False)
-                constrs += [canon_constr] + aux_constr
+                constrs.append(canon_constr)
+                constrs.extend(aux_constr)
         else:
             affine_atom = type(expr) not in self.cone_canon_methods
             canon_args = []
             constrs = []
             for arg in expr.args:
                 canon_arg, c = self.canonicalize_tree(arg, affine_atom and affine_above)
-                canon_args += [canon_arg]
-                constrs += c
+                canon_args.append(canon_arg)
+                constrs.extend(c)
             canon_expr, c = self.canonicalize_expr(expr, canon_args, affine_above)
-            constrs += c
+            constrs.extend(c)
         return canon_expr, constrs
 
     def canonicalize_expr(self, expr, args, affine_above: bool) -> Tuple[Expression, list]:

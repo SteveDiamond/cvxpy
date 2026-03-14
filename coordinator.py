@@ -118,14 +118,16 @@ class Coordinator:
         return {}
 
     def _set_memory(self, key: str, value: str, embed: bool = False) -> Any:
-        """Create or update a memory item."""
-        # Try update first, fall back to create
+        """Create or update a memory item.
+
+        When embed=True, deletes then re-creates to refresh the embedding.
+        """
+        if embed:
+            try:
+                self._call_tool("delete_memory", {"key_names": [key]})
+            except Exception:
+                pass
         try:
-            return self._call_tool("update_memory", {
-                "key_name": key,
-                "value": value,
-            })
-        except Exception:
             return self._call_tool("create_memory", {
                 "items": [{
                     "key_name": key,
@@ -133,6 +135,11 @@ class Coordinator:
                     "value": value,
                     "embed": embed,
                 }],
+            })
+        except Exception:
+            return self._call_tool("update_memory", {
+                "key_name": key,
+                "value": value,
             })
 
     def _get_memory(self, key: str) -> str | None:
@@ -392,6 +399,56 @@ class Coordinator:
         output = "\n".join(lines)
         print(output)
         return output
+
+    # ── Dedup / Prior Art ──────────────────────────────────────────
+
+    def check_tried(self, description: str, limit: int = 3) -> list[dict]:
+        """Search for similar past experiments. Call before starting any experiment."""
+        matches = self._search(description, limit=limit, prefix=f"{NAMESPACE}/results/")
+        if matches:
+            print(f"Found {len(matches)} similar past experiments:")
+            for m in matches:
+                if isinstance(m, dict):
+                    key = m.get("key_name", "")
+                    val = m.get("value", "")
+                    try:
+                        data = json.loads(val) if isinstance(val, str) else val
+                        desc = data.get("description", key)
+                        status = data.get("status", "?")
+                        geomean = data.get("benchmark", {}).get("geomean_ms", "?")
+                        print(f"  [{status}] {desc[:60]} (geomean={geomean})")
+                    except (json.JSONDecodeError, AttributeError):
+                        print(f"  {key}")
+        else:
+            print("No similar experiments found.")
+        return matches
+
+    # ── Traces ────────────────────────────────────────────────────
+
+    def publish_trace(
+        self, problem_name: str, backend: str, trace_data: list[dict]
+    ) -> str:
+        """Store execution trace as searchable insight in Ensue."""
+        slug = _slugify(f"{problem_name}-{backend}")
+        key = f"{NAMESPACE}/traces/{slug}"
+
+        top_funcs = trace_data[:10] if trace_data else []
+        summary = ", ".join(
+            f"{t['func']}({t.get('tottime_ms', 0):.1f}ms)" for t in top_funcs[:3]
+        )
+
+        value = {
+            "problem": problem_name,
+            "backend": backend,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "top_functions": top_funcs,
+            "summary": summary,
+        }
+        self._set_memory(key, json.dumps(value), embed=True)
+        print(f"Published trace: {problem_name}/{backend} -> {key}")
+        return key
+
+    # ── Search ────────────────────────────────────────────────────
 
     def ask(self, query: str) -> list[dict]:
         """

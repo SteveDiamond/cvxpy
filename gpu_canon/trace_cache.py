@@ -42,7 +42,11 @@ import cvxpy
 from cvxpy.lin_ops.lin_utils import ID_COUNTER
 
 from gpu_canon.tracer import NumpyTracer, TraceOp
-from gpu_canon.replayer import replay_on_gpu
+from gpu_canon.replayer import (
+    replay_on_gpu,
+    replay_on_gpu_optimized,
+    classify_trace_ops,
+)
 
 
 def reset_id_counter(value: int = 1):
@@ -169,6 +173,36 @@ class _CachedTrace:
                 self._A_indices_gpu = cup.asarray(A_structural["indices"])
                 self._A_indptr_gpu = cup.asarray(A_structural["indptr"])
                 self._A_shape = A_structural["shape"]
+
+        # Classify ops and pre-cache constant results on GPU.
+        # Constant ops produce identical results every replay, so we
+        # execute them once and cache the GPU arrays.
+        data_id_set = set(data_input_ids.keys())
+        self._constant_ids, self._data_op_indices = classify_trace_ops(
+            trace, data_id_set
+        )
+
+        # Pre-compute constant ops by running a full replay with the
+        # original data, then extracting only constant op results
+        self._cached_constants: dict[int, Any] = {}
+        if HAS_CUPY and self._data_op_indices:
+            try:
+                # Build initial arrays for the full replay
+                init = {}
+                init.update(self._structural_gpu)
+                for tid, arr in data_input_ids.items():
+                    init[tid] = cup.asarray(arr)
+
+                full_registry = replay_on_gpu(trace, init)
+
+                # Cache only constant op results
+                for tid in self._constant_ids:
+                    if tid in full_registry:
+                        self._cached_constants[tid] = full_registry[tid]
+            except Exception:
+                # If pre-caching fails, fall back to full replay
+                self._cached_constants = {}
+                self._data_op_indices = list(range(len(trace)))
 
 
 class TraceCache:
@@ -329,8 +363,13 @@ class TraceCache:
             for tid, original_arr in cached.data_input_ids.items():
                 initial_arrays[tid] = cup.asarray(original_arr)
 
-            # Replay the trace on GPU
-            registry = replay_on_gpu(cached.trace, initial_arrays)
+            # Optimized replay: skip constant ops, use cached results
+            registry = replay_on_gpu_optimized(
+                cached.trace,
+                initial_arrays,
+                cached_constants=cached._cached_constants,
+                data_op_indices=cached._data_op_indices,
+            )
 
             # Extract outputs using cached trace IDs
             A_gpu = None

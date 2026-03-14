@@ -375,9 +375,14 @@ class NumpyTracer:
         def wrapper(arrays, *args, **kwargs):
             result = original(arrays, *args, **kwargs)
             if tracer._active:
-                # Register all input arrays
-                input_list = list(arrays) if not isinstance(
-                    arrays, list) else arrays
+                # Convert non-array items (lists, scalars) to arrays
+                # so they get registered properly
+                input_list = []
+                for item in arrays:
+                    if _is_array_like(item):
+                        input_list.append(item)
+                    else:
+                        input_list.append(np.asarray(item))
                 kw = {}
                 if args:
                     kw["axis"] = args[0]
@@ -401,7 +406,7 @@ class NumpyTracer:
         return wrapper
 
     def _wrap_shape_func(self, name: str, original):
-        """Wrap functions like np.reshape(a, newshape)."""
+        """Wrap functions like np.reshape(a, newshape), np.repeat(a, reps)."""
         tracer = self
 
         @functools.wraps(original)
@@ -409,9 +414,19 @@ class NumpyTracer:
             result = original(a, *args, **kwargs)
             if tracer._active and _is_array_like(a):
                 kw = dict(kwargs)
+                # If the second arg is a numpy array (e.g. repeats in
+                # np.repeat), track it as a second input rather than
+                # baking it into kwargs.
+                extra_inputs = []
                 if args:
-                    kw["shape_arg"] = args[0]
-                tracer._record_op(f"np.{name}", a, result, **kw)
+                    arg0 = args[0]
+                    if _is_array_like(arg0):
+                        extra_inputs.append(arg0)
+                        kw["shape_arg_is_input"] = True
+                    else:
+                        kw["shape_arg"] = arg0
+                inputs = [a] + extra_inputs
+                tracer._record_op(f"np.{name}", inputs, result, **kw)
             return result
         return wrapper
 

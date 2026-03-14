@@ -110,9 +110,12 @@ def _replay_np_negative(inputs, kwargs, xp):
 
 
 def _replay_np_reshape(inputs, kwargs, xp):
-    shape = kwargs.get("shape_arg", kwargs.get("newshape"))
+    if kwargs.get("shape_arg_is_input") and len(inputs) > 1:
+        shape = tuple(int(x) for x in inputs[1].ravel())
+    else:
+        shape = kwargs.get("shape_arg", kwargs.get("newshape"))
     if shape is None:
-        raise ValueError("reshape: no shape argument recorded")
+        shape = kwargs.get("_output_shape")
     if isinstance(shape, list):
         shape = tuple(shape)
     order = kwargs.get("order", "C")
@@ -120,12 +123,28 @@ def _replay_np_reshape(inputs, kwargs, xp):
 
 
 def _replay_np_tile(inputs, kwargs, xp):
-    reps = kwargs.get("shape_arg")
+    if kwargs.get("shape_arg_is_input") and len(inputs) > 1:
+        reps = inputs[1]
+    else:
+        reps = kwargs.get("shape_arg")
     return xp.tile(inputs[0], reps)
 
 
 def _replay_np_repeat(inputs, kwargs, xp):
-    repeats = kwargs.get("shape_arg")
+    if kwargs.get("shape_arg_is_input") and len(inputs) > 1:
+        # repeats was traced as a second input array
+        repeats = inputs[1]
+        if hasattr(repeats, 'get'):
+            repeats = repeats.get()  # CuPy -> numpy for int conversion
+        if hasattr(repeats, 'tolist'):
+            repeats = repeats.tolist()
+    else:
+        repeats = kwargs.get("shape_arg")
+    # CuPy requires repeats to be int or sequence of ints
+    if hasattr(repeats, 'tolist'):
+        repeats = repeats.tolist()
+    if isinstance(repeats, list) and len(repeats) == 1:
+        repeats = repeats[0]
     axis = kwargs.get("axis")
     return xp.repeat(inputs[0], repeats, axis=axis)
 
@@ -382,6 +401,127 @@ def replay_on_gpu(
             result = cp.asarray(cv)
         else:
             # Dispatch
+            handler = _DISPATCH.get(op.op)
+            if handler is not None:
+                result = handler(inputs, kwargs, xp)
+            elif op.op.startswith("sp.") and op.op.split(".")[1] in (
+                    "coo_matrix", "csr_matrix", "csc_matrix",
+                    "coo_array", "csr_array", "csc_array"):
+                result = _replay_sparse_constructor(inputs, kwargs, xp)
+            elif op.op.startswith("sp."):
+                result = _replay_sparse_func(inputs, kwargs, xp)
+            else:
+                raise ValueError(f"Unknown trace op: {op.op}")
+
+        registry[op.output_id] = result
+
+    return registry
+
+
+def classify_trace_ops(
+    trace: list[TraceOp],
+    data_input_ids: set[int],
+) -> tuple[set[int], list[int]]:
+    """Classify trace ops as constant or data-dependent.
+
+    An op is "constant" if:
+    - It has constant_value and no inputs (constructor), OR
+    - All its inputs are constant ops or structural inputs
+
+    An op is "data-dependent" if any input (transitively) comes from
+    a data input.
+
+    Args:
+        trace: The trace ops.
+        data_input_ids: Set of trace IDs that are data inputs (change between calls).
+
+    Returns:
+        (constant_op_ids, data_op_indices):
+        - constant_op_ids: set of output trace IDs that are constant
+        - data_op_indices: list of indices into trace for data-dependent ops
+    """
+    # Start: all data input IDs are "tainted" (data-dependent)
+    tainted = set(data_input_ids)
+    constant_ids: set[int] = set()
+    data_op_indices: list[int] = []
+
+    for i, op in enumerate(trace):
+        # Check if any input is tainted
+        has_tainted_input = any(iid in tainted for iid in op.input_ids)
+
+        if has_tainted_input:
+            # This op depends on data — mark its output as tainted
+            tainted.add(op.output_id)
+            data_op_indices.append(i)
+        else:
+            # This op is constant — its result is the same every replay
+            constant_ids.add(op.output_id)
+
+    return constant_ids, data_op_indices
+
+
+def replay_on_gpu_optimized(
+    trace: list[TraceOp],
+    initial_arrays: dict[int, Any],
+    cached_constants: dict[int, Any] | None = None,
+    data_op_indices: list[int] | None = None,
+) -> dict[int, Any]:
+    """Optimized GPU replay that skips constant ops.
+
+    If cached_constants and data_op_indices are provided, only executes
+    data-dependent ops. Constant results are seeded from the cache.
+
+    Args:
+        trace: Full trace.
+        initial_arrays: Data inputs (transferred to GPU).
+        cached_constants: Pre-computed constant op results on GPU.
+        data_op_indices: Indices of data-dependent ops to execute.
+
+    Returns:
+        Registry of trace_id -> CuPy array.
+    """
+    if not HAS_CUPY:
+        raise RuntimeError("CuPy not available")
+
+    xp = cp
+    registry: dict[int, Any] = {}
+
+    # Seed with initial arrays
+    for tid, arr in initial_arrays.items():
+        if isinstance(arr, np.ndarray):
+            registry[tid] = cp.asarray(arr)
+        else:
+            registry[tid] = arr
+
+    # Seed with cached constants (no GPU transfer — already on GPU)
+    if cached_constants is not None:
+        registry.update(cached_constants)
+
+    # If we have data_op_indices, only execute those ops
+    if data_op_indices is not None:
+        ops_to_run = [(i, trace[i]) for i in data_op_indices]
+    else:
+        ops_to_run = list(enumerate(trace))
+
+    for _idx, op in ops_to_run:
+        inputs = []
+        for iid in op.input_ids:
+            if iid in registry:
+                inputs.append(registry[iid])
+            else:
+                raise KeyError(
+                    f"Trace replay: input {iid} not found for op {op.op}")
+
+        kwargs = dict(op.kwargs)
+        kwargs["_output_dtype"] = op.output_dtype
+        kwargs["_output_shape"] = op.output_shape
+
+        if op.constant_value is not None and not op.input_ids:
+            cv = op.constant_value
+            if hasattr(cv, 'dtype') and not _is_valid_dtype(str(cv.dtype)):
+                cv = np.zeros(cv.shape, dtype=np.float64)
+            result = cp.asarray(cv)
+        else:
             handler = _DISPATCH.get(op.op)
             if handler is not None:
                 result = handler(inputs, kwargs, xp)

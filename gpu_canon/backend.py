@@ -196,21 +196,63 @@ class CompiledProgram:
 
         Uses direct numpy construction (faster than canonInterface for large
         parameters) then transfers to GPU. In a full GPU pipeline, use
-        canonicalize(param_vec_gpu) to skip this entirely.
+        build_param_vector_from_gpu() or canonicalize(param_vec_gpu) instead.
         """
         pp = self._param_prob
-        # Direct construction is ~30% faster than canonInterface because
-        # it avoids the callback overhead per parameter.
         param_vec = np.zeros(self._total_param_size + 1)
         for pid, col in self._param_id_to_col.items():
             if pid == -1:
-                # Constant offset placeholder
                 param_vec[col] = 1.0
             else:
                 sz = self._param_id_to_size[pid]
                 val = np.asarray(pp.id_to_param[pid].value).flatten(order='F')
                 param_vec[col:col + sz] = val
         return cup.asarray(param_vec)
+
+    def build_param_vector_from_gpu(
+        self, param_values: dict[int, cup.ndarray] | None = None
+    ) -> cup.ndarray:
+        """Build parameter vector entirely on GPU from GPU-resident values.
+
+        This avoids the CPU->GPU transfer bottleneck. Use this when parameter
+        values are already on GPU (e.g., from a GPU simulation or learning loop).
+
+        Args:
+            param_values: dict mapping CVXPY Parameter.id -> cupy ndarray.
+                         If None, reads from CVXPY Parameter.value (via CPU).
+
+        Returns:
+            Parameter vector on GPU, ready for canonicalize().
+        """
+        if not hasattr(self, '_param_vec_buf'):
+            self._param_vec_buf = cup.zeros(self._total_param_size + 1)
+            const_col = self._param_id_to_col.get(-1)
+            if const_col is not None:
+                self._param_vec_buf[const_col] = 1.0
+            # Cache the param layout for fast GPU updates
+            self._param_layout = [
+                (pid, col, self._param_id_to_size[pid])
+                for pid, col in self._param_id_to_col.items()
+                if pid != -1
+            ]
+
+        if param_values is not None:
+            for pid, col, sz in self._param_layout:
+                # Flatten in Fortran (column-major) order to match CVXPY convention
+                v = param_values[pid]
+                if v.ndim > 1:
+                    self._param_vec_buf[col:col + sz] = v.ravel(order='F')
+                else:
+                    self._param_vec_buf[col:col + sz] = v.ravel()
+        else:
+            # Fallback: read from CVXPY params (CPU transfer)
+            pp = self._param_prob
+            for pid, col, sz in self._param_layout:
+                val = cup.asarray(
+                    np.asarray(pp.id_to_param[pid].value).flatten(order='F'))
+                self._param_vec_buf[col:col + sz] = val
+
+        return self._param_vec_buf
 
     def canonicalize(self, param_vec_gpu: cup.ndarray | None = None) -> tuple:
         """

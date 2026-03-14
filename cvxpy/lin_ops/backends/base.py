@@ -514,21 +514,8 @@ class PythonCanonBackend(CanonBackend):
         self.id_to_col.pop(-1)
         return tensor_res.flatten_tensor(self.param_size_plus_one, order=order)
 
-    def process_constraint(self, lin_op: LinOp, empty_view: TensorView) -> TensorView:
-        """
-        Depth-first parsing of a linOp node.
-
-        Parameters
-        ----------
-        lin_op: a node in the linOp tree.
-        empty_view: TensorView used to create tensors for leaf nodes.
-
-        Returns
-        -------
-        The processed node as a TensorView.
-        """
-
-        # Leaf nodes
+    def _process_leaf(self, lin_op: LinOp, empty_view: TensorView) -> TensorView | None:
+        """Process a leaf node, returning a TensorView or None if not a leaf."""
         if lin_op.type == "variable":
             assert isinstance(lin_op.data, int)
             assert s.ALLOW_ND_EXPR or len(lin_op.shape) in {0, 1, 2}
@@ -543,23 +530,88 @@ class PythonCanonBackend(CanonBackend):
             param_tensor = self.get_param_tensor(lin_op.shape, lin_op.data)
             return empty_view.create_new_tensor_view({Constant.ID.value}, param_tensor,
                                                      is_parameter_free=False)
+        return None
 
-        # Internal nodes
-        else:
-            func = self.get_func(lin_op.type)
-            if lin_op.type in {"concatenate", "vstack", "hstack"}:
-                return func(lin_op, empty_view)
+    def process_constraint(self, lin_op: LinOp, empty_view: TensorView) -> TensorView:
+        """
+        Iterative depth-first parsing of a linOp tree.
 
-            res = None
-            for arg in lin_op.args:
-                arg_coeff = self.process_constraint(arg, empty_view)
-                arg_res = func(lin_op, arg_coeff)
-                if res is None:
-                    res = arg_res
+        Uses an explicit stack to avoid Python function call overhead
+        for deep/wide trees (e.g., scalarized problems with 1000+ nodes).
+
+        Parameters
+        ----------
+        lin_op: a node in the linOp tree.
+        empty_view: TensorView used to create tensors for leaf nodes.
+
+        Returns
+        -------
+        The processed node as a TensorView.
+        """
+        _CONCAT_TYPES = {"concatenate", "vstack", "hstack"}
+
+        # Fast path for leaf nodes (most common in DPP re-canonicalization)
+        leaf = self._process_leaf(lin_op, empty_view)
+        if leaf is not None:
+            return leaf
+
+        # Stack entries: (lin_op, func, arg_index, accumulated_result)
+        # When arg_index == len(args), the node is complete.
+        stack: list[list] = []
+        result: TensorView | None = None
+
+        # Initialize with root node
+        current = lin_op
+
+        while True:
+            # Process current node
+            if current is not None:
+                leaf = self._process_leaf(current, empty_view)
+                if leaf is not None:
+                    result = leaf
+                    current = None
                 else:
-                    res += arg_res
-            assert res is not None
-            return res
+                    func = self.get_func(current.type)
+                    if current.type in _CONCAT_TYPES:
+                        # Concat ops handle their own recursion
+                        result = func(current, empty_view)
+                        current = None
+                    elif not current.args:
+                        assert False, f"Non-leaf node with no args: {current.type}"
+                    else:
+                        # Push frame and descend into first arg
+                        stack.append([current, func, 0, None])
+                        current = current.args[0]
+                        continue
+
+            # Result is ready — apply it to parent frame
+            if not stack:
+                break
+
+            frame = stack[-1]
+            parent_op, func, arg_idx, acc = frame
+
+            # Apply func to the child result
+            arg_res = func(parent_op, result)
+            if acc is None:
+                acc = arg_res
+            else:
+                acc += arg_res
+
+            arg_idx += 1
+            if arg_idx < len(parent_op.args):
+                # More args to process
+                frame[2] = arg_idx
+                frame[3] = acc
+                current = parent_op.args[arg_idx]
+            else:
+                # All args processed — pop frame and propagate result up
+                stack.pop()
+                result = acc
+                current = None
+
+        assert result is not None
+        return result
 
     def get_constant_data(
         self, lin_op: LinOp, view: TensorView, target_shape: tuple[int, ...] | None

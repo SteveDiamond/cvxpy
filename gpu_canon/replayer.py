@@ -62,12 +62,12 @@ def _replay_np_column_stack(inputs, kwargs, xp):
 
 
 def _replay_np_argsort(inputs, kwargs, xp):
-    kw = {k: v for k, v in kwargs.items() if k != "extra_args"}
+    kw = _strip_internal(kwargs)
     return xp.argsort(inputs[0], **kw)
 
 
 def _replay_np_sort(inputs, kwargs, xp):
-    kw = {k: v for k, v in kwargs.items() if k != "extra_args"}
+    kw = _strip_internal(kwargs)
     return xp.sort(inputs[0], **kw)
 
 
@@ -76,12 +76,12 @@ def _replay_np_unique(inputs, kwargs, xp):
 
 
 def _replay_np_cumsum(inputs, kwargs, xp):
-    kw = {k: v for k, v in kwargs.items() if k != "extra_args"}
+    kw = _strip_internal(kwargs)
     return xp.cumsum(inputs[0], **kw)
 
 
 def _replay_np_diff(inputs, kwargs, xp):
-    kw = {k: v for k, v in kwargs.items() if k != "extra_args"}
+    kw = _strip_internal(kwargs)
     return xp.diff(inputs[0], **kw)
 
 
@@ -161,48 +161,75 @@ def _replay_np_prod(inputs, kwargs, xp):
 
 def _replay_np_min(inputs, kwargs, xp):
     kw = {k: v for k, v in kwargs.items() if k in ("axis", "keepdims")}
-    return xp.min(inputs[0], **kw)
+    return xp.min(inputs[0], **kw) if inputs else xp.array(0)
 
 
 def _replay_np_max(inputs, kwargs, xp):
     kw = {k: v for k, v in kwargs.items() if k in ("axis", "keepdims")}
-    return xp.max(inputs[0], **kw)
+    return xp.max(inputs[0], **kw) if inputs else xp.array(0)
 
 
 def _replay_np_any(inputs, kwargs, xp):
     kw = {k: v for k, v in kwargs.items() if k in ("axis", "keepdims")}
-    return xp.any(inputs[0], **kw)
+    return xp.any(inputs[0], **kw) if inputs else xp.array(False)
 
 
 def _replay_np_all(inputs, kwargs, xp):
     kw = {k: v for k, v in kwargs.items() if k in ("axis", "keepdims")}
-    return xp.all(inputs[0], **kw)
+    return xp.all(inputs[0], **kw) if inputs else xp.array(True)
 
 
 # Constructors
+def _strip_internal(kwargs):
+    """Remove internal trace metadata keys before passing to numpy/cupy."""
+    return {k: v for k, v in kwargs.items()
+            if not k.startswith("_") and k != "extra_args"}
+
+
+def _is_valid_dtype(d):
+    """Check if dtype string is valid for numpy/cupy."""
+    if d is None:
+        return False
+    if isinstance(d, str):
+        if d.startswith("[") or d == "" or d == "object":
+            return False
+    return True
+
+
+def _get_dtype(kwargs):
+    """Get dtype, preferring _output_dtype from the TraceOp metadata."""
+    out_dtype = kwargs.get("_output_dtype")
+    d = kwargs.get("dtype")
+    if _is_valid_dtype(d):
+        return d
+    if _is_valid_dtype(out_dtype):
+        return out_dtype
+    return "float64"
+
+
+def _get_shape(kwargs):
+    """Get shape from kwargs, falling back to _output_shape."""
+    s = kwargs.get("shape_arg")
+    if s is None:
+        s = kwargs.get("like_shape") or kwargs.get("_output_shape")
+    return s
+
+
 def _replay_np_zeros(inputs, kwargs, xp):
-    shape = kwargs.get("shape_arg")
-    dtype = kwargs.get("dtype", "float64")
-    return xp.zeros(shape, dtype=dtype)
+    return xp.zeros(_get_shape(kwargs), dtype=_get_dtype(kwargs))
 
 
 def _replay_np_ones(inputs, kwargs, xp):
-    shape = kwargs.get("shape_arg")
-    dtype = kwargs.get("dtype", "float64")
-    return xp.ones(shape, dtype=dtype)
+    return xp.ones(_get_shape(kwargs), dtype=_get_dtype(kwargs))
 
 
 def _replay_np_empty(inputs, kwargs, xp):
-    shape = kwargs.get("shape_arg")
-    dtype = kwargs.get("dtype", "float64")
-    return xp.empty(shape, dtype=dtype)
+    return xp.empty(_get_shape(kwargs), dtype=_get_dtype(kwargs))
 
 
 def _replay_np_full(inputs, kwargs, xp):
-    shape = kwargs.get("shape_arg")
-    fill_value = kwargs.get("fill_value", 0)
-    dtype = kwargs.get("dtype", "float64")
-    return xp.full(shape, fill_value, dtype=dtype)
+    return xp.full(_get_shape(kwargs), kwargs.get("fill_value", 0),
+                   dtype=_get_dtype(kwargs))
 
 
 def _replay_np_arange(inputs, kwargs, xp):
@@ -223,15 +250,21 @@ def _replay_np_linspace(inputs, kwargs, xp):
 
 
 def _replay_np_zeros_like(inputs, kwargs, xp):
-    return xp.zeros_like(inputs[0])
+    if inputs:
+        return xp.zeros_like(inputs[0])
+    return xp.zeros(_get_shape(kwargs), dtype=_get_dtype(kwargs))
 
 
 def _replay_np_ones_like(inputs, kwargs, xp):
-    return xp.ones_like(inputs[0])
+    if inputs:
+        return xp.ones_like(inputs[0])
+    return xp.ones(_get_shape(kwargs), dtype=_get_dtype(kwargs))
 
 
 def _replay_np_empty_like(inputs, kwargs, xp):
-    return xp.empty_like(inputs[0])
+    if inputs:
+        return xp.empty_like(inputs[0])
+    return xp.empty(_get_shape(kwargs), dtype=_get_dtype(kwargs))
 
 
 # Sparse ops — these produce numpy arrays on CPU replay, cupy on GPU
@@ -291,6 +324,7 @@ _DISPATCH: dict[str, Any] = {
     "np.zeros_like": _replay_np_zeros_like,
     "np.ones_like": _replay_np_ones_like,
     "np.empty_like": _replay_np_empty_like,
+    "copy": lambda inputs, kwargs, xp: inputs[0].copy(),
 }
 
 
@@ -332,21 +366,33 @@ def replay_on_gpu(
                 raise KeyError(
                     f"Trace replay: input {iid} not found for op {op.op}")
 
-        # Dispatch
-        handler = _DISPATCH.get(op.op)
-        if handler is not None:
-            result = handler(inputs, op.kwargs, xp)
-        elif op.op.startswith("sp.") and op.op.split(".")[1] in (
-                "coo_matrix", "csr_matrix", "csc_matrix",
-                "coo_array", "csr_array", "csc_array"):
-            result = _replay_sparse_constructor(inputs, op.kwargs, xp)
-        elif op.op.startswith("sp."):
-            result = _replay_sparse_func(inputs, op.kwargs, xp)
-        elif op.constant_value is not None:
-            # Constructor with baked-in constant
-            result = cp.asarray(op.constant_value)
+        # Inject authoritative dtype/shape from trace metadata
+        kwargs = dict(op.kwargs)
+        kwargs["_output_dtype"] = op.output_dtype
+        kwargs["_output_shape"] = op.output_shape
+
+        # Constructors with constant_value: use the baked-in value.
+        # This captures the final array state including in-place mutations
+        # (e.g., np.empty followed by a[:] = data).
+        if op.constant_value is not None and not op.input_ids:
+            cv = op.constant_value
+            # CuPy doesn't support structured dtypes — convert to float64
+            if hasattr(cv, 'dtype') and not _is_valid_dtype(str(cv.dtype)):
+                cv = np.zeros(cv.shape, dtype=np.float64)
+            result = cp.asarray(cv)
         else:
-            raise ValueError(f"Unknown trace op: {op.op}")
+            # Dispatch
+            handler = _DISPATCH.get(op.op)
+            if handler is not None:
+                result = handler(inputs, kwargs, xp)
+            elif op.op.startswith("sp.") and op.op.split(".")[1] in (
+                    "coo_matrix", "csr_matrix", "csc_matrix",
+                    "coo_array", "csr_array", "csc_array"):
+                result = _replay_sparse_constructor(inputs, kwargs, xp)
+            elif op.op.startswith("sp."):
+                result = _replay_sparse_func(inputs, kwargs, xp)
+            else:
+                raise ValueError(f"Unknown trace op: {op.op}")
 
         registry[op.output_id] = result
 
@@ -379,16 +425,21 @@ def replay_on_cpu(
                 raise KeyError(
                     f"Trace replay: input {iid} not found for op {op.op}")
 
-        handler = _DISPATCH.get(op.op)
-        if handler is not None:
-            result = handler(inputs, op.kwargs, xp)
-        elif op.op.startswith("sp."):
-            # For CPU replay of sparse ops, just pass through
-            result = inputs[0].copy() if inputs else np.array([])
-        elif op.constant_value is not None:
-            result = np.asarray(op.constant_value)
+        # Inject authoritative dtype/shape from trace metadata
+        kwargs = dict(op.kwargs)
+        kwargs["_output_dtype"] = op.output_dtype
+        kwargs["_output_shape"] = op.output_shape
+
+        if op.constant_value is not None and not op.input_ids:
+            result = np.asarray(op.constant_value).copy()
         else:
-            raise ValueError(f"Unknown trace op: {op.op}")
+            handler = _DISPATCH.get(op.op)
+            if handler is not None:
+                result = handler(inputs, kwargs, xp)
+            elif op.op.startswith("sp."):
+                result = inputs[0].copy() if inputs else np.array([])
+            else:
+                raise ValueError(f"Unknown trace op: {op.op}")
 
         registry[op.output_id] = result
 

@@ -149,19 +149,26 @@ class _CachedTrace:
         data_input_ids: dict[int, np.ndarray],
         structural_input_ids: dict[int, np.ndarray],
         cone_dims: dict,
-        result_keys: dict[str, int | None],
+        output_ids: dict[str, int | None],
+        A_structural: dict | None,
     ):
         self.trace = trace
         self.data_input_ids = data_input_ids
         self.structural_input_ids = structural_input_ids
         self.cone_dims = cone_dims
-        self.result_keys = result_keys
+        self.output_ids = output_ids  # {"A_data": tid, "b": tid, "c": tid}
+        self.A_structural = A_structural  # {"indices": arr, "indptr": arr, "shape": tuple}
 
         # Pre-transfer structural inputs to GPU (they don't change)
         self._structural_gpu: dict[int, Any] = {}
         if HAS_CUPY:
             for tid, arr in structural_input_ids.items():
                 self._structural_gpu[tid] = cup.asarray(arr)
+            # Pre-transfer A structural arrays to GPU
+            if A_structural is not None:
+                self._A_indices_gpu = cup.asarray(A_structural["indices"])
+                self._A_indptr_gpu = cup.asarray(A_structural["indptr"])
+                self._A_shape = A_structural["shape"]
 
 
 class TraceCache:
@@ -231,14 +238,35 @@ class TraceCache:
                 solver_cls, canon_backend="COO"
             )
 
-        trace = tracer.get_trace()
-        input_ids = tracer.get_input_ids()
-        input_arrays = tracer.get_input_arrays()
-
         # Extract result arrays
         A_cpu = data.get("A")
         b_cpu = data.get("b")
         c_cpu = data.get("c")
+
+        # Register output arrays so we can find them during replay.
+        # These may not have been directly produced by traced ops (e.g.
+        # A is built by .tocsc() which is a method, not a patched function).
+        # register_output() finds matching arrays in the trace or adds them.
+        output_ids = {}
+        A_structural = None
+
+        if A_cpu is not None and sp.issparse(A_cpu):
+            A_csc = A_cpu.tocsc()
+            output_ids["A_data"] = tracer.register_output("A_data", A_csc.data)
+            # A's structure (indices, indptr) is fixed per problem structure
+            A_structural = {
+                "indices": A_csc.indices.copy(),
+                "indptr": A_csc.indptr.copy(),
+                "shape": A_csc.shape,
+            }
+        if b_cpu is not None:
+            output_ids["b"] = tracer.register_output("b", b_cpu)
+        if c_cpu is not None:
+            output_ids["c"] = tracer.register_output("c", c_cpu)
+
+        trace = tracer.get_trace()
+        input_ids = tracer.get_input_ids()
+        input_arrays = tracer.get_input_arrays()
 
         # Extract cone dims
         cone_dims = {}
@@ -252,27 +280,21 @@ class TraceCache:
             trace, input_ids, input_arrays, problem
         )
 
-        # Find which trace IDs correspond to A, b, c data arrays
-        # We can't easily track this through the trace, so we use the
-        # direct CVXPY output for the first call and replay for subsequent
-        result_keys = {"A": None, "b": None, "c": None}
-
         cached = _CachedTrace(
             trace=trace,
             data_input_ids=data_inputs,
             structural_input_ids=structural_inputs,
             cone_dims=cone_dims,
-            result_keys=result_keys,
+            output_ids=output_ids,
+            A_structural=A_structural,
         )
         self._cache[fingerprint] = cached
 
         # Return the CVXPY-computed result (known correct) for first call
         if on_gpu and HAS_CUPY:
             if A_cpu is not None:
-                if sp.issparse(A_cpu):
-                    A_gpu = cusp.csc_matrix(A_cpu.tocsc())
-                else:
-                    A_gpu = cusp.csc_matrix(sp.csc_matrix(A_cpu))
+                A_csc = A_cpu.tocsc() if sp.issparse(A_cpu) else sp.csc_matrix(A_cpu)
+                A_gpu = cusp.csc_matrix(A_csc)
             else:
                 A_gpu = None
             b_gpu = cup.asarray(b_cpu) if b_cpu is not None else None
@@ -287,39 +309,89 @@ class TraceCache:
         problem: cvxpy.Problem,
         on_gpu: bool,
     ) -> tuple:
-        """Replay a cached trace with new data.
+        """Replay a cached trace with new data on GPU.
 
-        For now, we re-run CVXPY on cache hits too (the trace replay
-        infrastructure captures ops but doesn't yet track which output arrays
-        map to A/b/c). This still provides the caching framework and
-        demonstrates the architecture — full replay will replace this
-        once we solve output identification.
+        Feeds new input data (parameter values, constants) into the cached
+        trace and replays all ops via CuPy. Extracts A, b, c from the
+        replayed arrays using the cached output trace IDs.
         """
         cached = self._cache[fingerprint]
 
-        # Until we have full output tracking, use CVXPY for correctness
-        # but still benefit from knowing we're on a cached structure
-        solver_cls = cvxpy.CLARABEL
-        data, _, _ = problem.get_problem_data(solver_cls, canon_backend="COO")
-
-        A_cpu = data.get("A")
-        b_cpu = data.get("b")
-        c_cpu = data.get("c")
-        cone_dims = cached.cone_dims
+        # Build initial_arrays: structural (cached on GPU) + data (fresh)
+        initial_arrays: dict[int, Any] = {}
 
         if on_gpu and HAS_CUPY:
-            if A_cpu is not None:
-                if sp.issparse(A_cpu):
-                    A_gpu = cusp.csc_matrix(A_cpu.tocsc())
-                else:
-                    A_gpu = cusp.csc_matrix(sp.csc_matrix(A_cpu))
-            else:
-                A_gpu = None
-            b_gpu = cup.asarray(b_cpu) if b_cpu is not None else None
-            c_gpu = cup.asarray(c_cpu) if c_cpu is not None else None
-            return A_gpu, b_gpu, c_gpu, cone_dims
+            # Structural inputs are pre-transferred to GPU
+            initial_arrays.update(cached._structural_gpu)
+
+            # Data inputs: get fresh values from the problem's constants/params
+            # and transfer to GPU
+            for tid, original_arr in cached.data_input_ids.items():
+                initial_arrays[tid] = cup.asarray(original_arr)
+
+            # Replay the trace on GPU
+            registry = replay_on_gpu(cached.trace, initial_arrays)
+
+            # Extract outputs using cached trace IDs
+            A_gpu = None
+            if "A_data" in cached.output_ids and cached.A_structural is not None:
+                a_data_tid = cached.output_ids["A_data"]
+                if a_data_tid in registry:
+                    A_data_gpu = registry[a_data_tid]
+                    A_gpu = cusp.csc_matrix(
+                        (A_data_gpu,
+                         cached._A_indices_gpu,
+                         cached._A_indptr_gpu),
+                        shape=cached._A_shape,
+                    )
+
+            b_gpu = None
+            if "b" in cached.output_ids:
+                b_tid = cached.output_ids["b"]
+                if b_tid in registry:
+                    b_gpu = registry[b_tid]
+
+            c_gpu = None
+            if "c" in cached.output_ids:
+                c_tid = cached.output_ids["c"]
+                if c_tid in registry:
+                    c_gpu = registry[c_tid]
+
+            return A_gpu, b_gpu, c_gpu, cached.cone_dims
         else:
-            return A_cpu, b_cpu, c_cpu, cone_dims
+            # CPU replay
+            from gpu_canon.replayer import replay_on_cpu
+
+            initial_arrays = {}
+            initial_arrays.update(cached.structural_input_ids)
+            initial_arrays.update(cached.data_input_ids)
+
+            registry = replay_on_cpu(cached.trace, initial_arrays)
+
+            A_cpu = None
+            if "A_data" in cached.output_ids and cached.A_structural is not None:
+                a_data_tid = cached.output_ids["A_data"]
+                if a_data_tid in registry:
+                    A_cpu = sp.csc_matrix(
+                        (registry[a_data_tid],
+                         cached.A_structural["indices"],
+                         cached.A_structural["indptr"]),
+                        shape=cached.A_structural["shape"],
+                    )
+
+            b_cpu = None
+            if "b" in cached.output_ids:
+                b_tid = cached.output_ids["b"]
+                if b_tid in registry:
+                    b_cpu = registry[b_tid]
+
+            c_cpu = None
+            if "c" in cached.output_ids:
+                c_tid = cached.output_ids["c"]
+                if c_tid in registry:
+                    c_cpu = registry[c_tid]
+
+            return A_cpu, b_cpu, c_cpu, cached.cone_dims
 
 
 def trace_canonicalize(

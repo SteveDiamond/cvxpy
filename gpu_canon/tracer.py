@@ -187,6 +187,62 @@ class NumpyTracer:
         """Return map of trace_id -> numpy array for all inputs."""
         return dict(self._input_arrays)
 
+    def register_output(self, name: str, arr: np.ndarray) -> int | None:
+        """Explicitly register an output array and return its trace ID.
+
+        After tracing completes, call this for result arrays (A.data, b, c)
+        so the replayer knows which trace IDs to extract.
+
+        If the array was produced by a traced op, returns its existing trace ID.
+        If not (produced by untraced code like .tocsc()), registers it as a
+        new node and adds a 'copy_from_source' op that links it to the closest
+        matching array in the trace.
+        """
+        tid = self._registry.lookup(arr)
+        if tid is not None:
+            return tid
+
+        # Array wasn't directly traced. Search for a matching array by value.
+        # This handles cases like .tocsc() creating new arrays from traced ones.
+        best_tid = None
+        for ref in self._registry._refs:
+            if (hasattr(ref, 'shape') and ref.shape == arr.shape
+                    and ref.dtype == arr.dtype):
+                candidate_tid = self._registry.lookup(ref)
+                if candidate_tid is not None:
+                    try:
+                        if np.array_equal(ref, arr):
+                            best_tid = candidate_tid
+                            break
+                    except (ValueError, TypeError):
+                        continue
+
+        if best_tid is not None:
+            # Found a matching array. Update the source op's constant_value
+            # to capture the final state (in-place mutations may have
+            # changed it since the op was first recorded).
+            for op in self._ops:
+                if op.output_id == best_tid and op.constant_value is not None:
+                    op.constant_value = arr.copy()
+                    break
+
+            # Record a copy op linking output to source
+            new_tid = self._registry.register(arr)
+            self._ops.append(TraceOp(
+                op="copy",
+                input_ids=[best_tid],
+                output_id=new_tid,
+                output_shape=arr.shape,
+                output_dtype=str(arr.dtype),
+            ))
+            return new_tid
+
+        # No match found — register as a new constant input
+        new_tid = self._registry.register(arr)
+        self._input_ids.add(new_tid)
+        self._input_arrays[new_tid] = arr
+        return new_tid
+
     # ── Patching infrastructure ───────────────────────────────────────────
 
     def _install_patches(self):
@@ -367,9 +423,29 @@ class NumpyTracer:
         def wrapper(*args, **kwargs):
             result = original(*args, **kwargs)
             if tracer._active and _is_array_like(result):
-                kw = dict(kwargs)
+                kw = {}
+                # Serialize only safe kwargs
+                for k, v in kwargs.items():
+                    if isinstance(v, (int, float, str, bool, tuple,
+                                     list, type(None))):
+                        kw[k] = v
+                    elif k == "dtype":
+                        kw["dtype"] = str(np.dtype(v))
+                # For shape-based constructors (zeros, ones, arange, etc.),
+                # extract the shape/size arg in a serializable form
                 if args:
-                    kw["shape_arg"] = args[0]
+                    arg0 = args[0]
+                    if isinstance(arg0, (int, float)):
+                        kw["shape_arg"] = arg0
+                    elif isinstance(arg0, (tuple, list)):
+                        kw["shape_arg"] = tuple(arg0)
+                    elif _is_array_like(arg0):
+                        # *_like functions: don't store the array, just
+                        # record shape and dtype from the result
+                        kw["like_shape"] = result.shape
+                        kw["like_dtype"] = str(result.dtype)
+                    # else: skip unserializable args
+
                 op = TraceOp(
                     op=f"np.{name}",
                     input_ids=[],

@@ -160,6 +160,10 @@ class CompiledProgram:
         self._param_id_to_size = pp.param_id_to_size
         self._total_param_size = pp.total_param_size
 
+        # Pre-allocated output buffers for hot-path reuse (populated on first call)
+        self._cached_A = None
+        self._cached_b = None
+
         self._dpp_ready = True
 
     def _build_param_vector_gpu(self) -> cup.ndarray:
@@ -179,7 +183,8 @@ class CompiledProgram:
                 param_vec[col] = 1.0
             else:
                 sz = self._param_id_to_size[pid]
-                param_vec[col:col + sz] = pp.id_to_param[pid].value.flatten(order='F')
+                val = np.asarray(pp.id_to_param[pid].value).flatten(order='F')
+                param_vec[col:col + sz] = val
         return cup.asarray(param_vec)
 
     def canonicalize(self, param_vec_gpu: cup.ndarray | None = None) -> tuple:
@@ -194,52 +199,117 @@ class CompiledProgram:
             (A, b, c, cone_dims) all on GPU.
         """
         if not self._dpp_ready:
-            # Non-DPP: no re-canonicalization possible.
-            # The compile step (CompiledProgram.__init__) already produced the result.
             return self._A_gpu, self._b_gpu, self._c_gpu, self.cone_dims
 
-        # DPP hot path: re-evaluate with new parameter values
         if param_vec_gpu is None:
             param_vec_gpu = self._build_param_vector_gpu()
 
         # === HOT PATH: all GPU from here ===
+        A_gpu, b_gpu = self._apply_A_b(param_vec_gpu)
+        c_gpu = self._apply_objective(param_vec_gpu)
+        return A_gpu, b_gpu, c_gpu, self.cone_dims
 
-        # A matrix + b vector: flat_data = A_tensor @ param_vec
-        if self._A_tensor_gpu is not None:
-            flat_data = self._A_tensor_gpu @ param_vec_gpu
+    def canonicalize_inplace(self, param_vec_gpu: cup.ndarray | None = None) -> tuple:
+        """
+        Like canonicalize(), but reuses cached GPU buffers when possible.
 
-            if self._A_pdi_mode:
-                # PDI mode: flat_data contains interleaved A and b values.
-                # We pre-split the CSC index structure in _setup_dpp_gpu so
-                # we can assemble A and extract b with zero extra copies.
-                split = self._A_flat_split
+        This avoids allocating new CSC matrix objects on each call, which
+        reduces Python/CuPy overhead in tight re-solve loops. The returned
+        A matrix's data array is overwritten on subsequent calls.
 
-                # A: CSC from first `split` values
+        Args:
+            param_vec_gpu: Parameter vector already on GPU.
+
+        Returns:
+            (A, b, c, cone_dims) all on GPU. A.data is a view that will be
+            overwritten on the next call.
+        """
+        if not self._dpp_ready:
+            return self._A_gpu, self._b_gpu, self._c_gpu, self.cone_dims
+
+        if param_vec_gpu is None:
+            param_vec_gpu = self._build_param_vector_gpu()
+
+        # === HOT PATH: all GPU, minimal allocation ===
+        A_gpu, b_gpu = self._apply_A_b_inplace(param_vec_gpu)
+        c_gpu = self._apply_objective(param_vec_gpu)
+        return A_gpu, b_gpu, c_gpu, self.cone_dims
+
+    def _apply_A_b(self, param_vec_gpu: cup.ndarray) -> tuple:
+        """Compute A matrix and b vector from parameter vector."""
+        if self._A_tensor_gpu is None:
+            return self._A_gpu, self._b_gpu
+
+        flat_data = self._A_tensor_gpu @ param_vec_gpu
+
+        if self._A_pdi_mode:
+            split = self._A_flat_split
+
+            A_gpu = cusp.csc_matrix(
+                (flat_data[:split],
+                 self._A_indices_gpu,
+                 self._A_indptr_gpu),
+                shape=self._A_csc_shape,
+            )
+
+            if self._b_nnz > 0:
+                b_gpu = cup.zeros(self._b_size, dtype=flat_data.dtype)
+                b_gpu[self._b_indices_gpu] = flat_data[split:split + self._b_nnz]
+            else:
+                b_gpu = cup.zeros(self._b_size, dtype=flat_data.dtype)
+        else:
+            n_cols = self._A_var_len + 1
+            n_rows = flat_data.size // n_cols
+            M = flat_data.reshape((n_rows, n_cols), order='F')
+            A_gpu = cusp.csc_matrix(M[:, :-1])
+            b_gpu = M[:, -1].ravel()
+
+        return A_gpu, b_gpu
+
+    def _apply_A_b_inplace(self, param_vec_gpu: cup.ndarray) -> tuple:
+        """Compute A and b, reusing cached GPU objects to minimize allocation."""
+        if self._A_tensor_gpu is None:
+            return self._A_gpu, self._b_gpu
+
+        flat_data = self._A_tensor_gpu @ param_vec_gpu
+
+        if self._A_pdi_mode:
+            split = self._A_flat_split
+
+            if self._cached_A is not None:
+                # Reuse: just swap the data pointer (same sparsity pattern)
+                self._cached_A.data = flat_data[:split]
+                A_gpu = self._cached_A
+            else:
                 A_gpu = cusp.csc_matrix(
                     (flat_data[:split],
                      self._A_indices_gpu,
                      self._A_indptr_gpu),
                     shape=self._A_csc_shape,
                 )
+                self._cached_A = A_gpu
 
-                # b: scatter the last (b_nnz) values into a dense vector
-                if self._b_nnz > 0:
-                    b_gpu = cup.zeros(self._b_size, dtype=flat_data.dtype)
-                    b_gpu[self._b_indices_gpu] = flat_data[split:split + self._b_nnz]
-                else:
-                    b_gpu = cup.zeros(self._b_size, dtype=flat_data.dtype)
+            if self._b_nnz > 0:
+                if self._cached_b is None:
+                    self._cached_b = cup.zeros(self._b_size, dtype=flat_data.dtype)
+                self._cached_b[:] = 0
+                self._cached_b[self._b_indices_gpu] = flat_data[split:split + self._b_nnz]
+                b_gpu = self._cached_b
             else:
-                # Non-PDI: reshape into dense matrix then extract A and b
-                n_cols = self._A_var_len + 1
-                n_rows = flat_data.size // n_cols
-                M = flat_data.reshape((n_rows, n_cols), order='F')
-                A_gpu = cusp.csc_matrix(M[:, :-1])
-                b_gpu = M[:, -1].ravel()
+                if self._cached_b is None:
+                    self._cached_b = cup.zeros(self._b_size, dtype=flat_data.dtype)
+                b_gpu = self._cached_b
         else:
-            A_gpu = self._A_gpu
-            b_gpu = self._b_gpu
+            n_cols = self._A_var_len + 1
+            n_rows = flat_data.size // n_cols
+            M = flat_data.reshape((n_rows, n_cols), order='F')
+            A_gpu = cusp.csc_matrix(M[:, :-1])
+            b_gpu = M[:, -1].ravel()
 
-        # Objective: c = q_tensor @ param_vec (with offset d)
+        return A_gpu, b_gpu
+
+    def _apply_objective(self, param_vec_gpu: cup.ndarray) -> cup.ndarray:
+        """Compute objective vector c from parameter vector."""
         c_gpu = self._c_gpu
         if self._q_tensor_gpu is not None:
             qd = self._q_tensor_gpu @ param_vec_gpu
@@ -248,9 +318,7 @@ class CompiledProgram:
                 n_q_rows = qd.size // n_q_cols
                 Q = qd.reshape((n_q_rows, n_q_cols), order='F')
                 c_gpu = Q[:, :-1].ravel()
-                # d (offset) = Q[:, -1] — ignored for now
-
-        return A_gpu, b_gpu, c_gpu, self.cone_dims
+        return c_gpu
 
 
 def canonicalize_gpu(

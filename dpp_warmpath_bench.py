@@ -204,7 +204,6 @@ def time_gpu_warm_prebuilt(prob, params, n_warmup, n_iters, n_resolves):
 
     times = []
     for trial in range(n_warmup + n_iters):
-        # Build param vector on GPU once (simulates GPU-resident pipeline)
         for p in params:
             if p.size == 1:
                 p.value = abs(np.random.randn()) + 0.01
@@ -219,6 +218,41 @@ def time_gpu_warm_prebuilt(prob, params, n_warmup, n_iters, n_resolves):
 
         for _ in range(n_resolves):
             compiled.canonicalize(param_vec_gpu)
+
+        cup.cuda.Device(0).synchronize()
+        elapsed = (time.perf_counter() - start) * 1000
+
+        if trial >= n_warmup:
+            times.append(elapsed / n_resolves)
+
+    return times, ""
+
+
+def time_gpu_warm_inplace(prob, params, n_warmup, n_iters, n_resolves):
+    """GPU warm path with inplace updates (minimal allocation)."""
+    if not HAS_GPU:
+        return [], "No GPU"
+
+    compiled = CompiledProgram(prob, "CLARABEL")
+    if not compiled._dpp_ready:
+        return [], "Not DPP-ready on GPU"
+
+    times = []
+    for trial in range(n_warmup + n_iters):
+        for p in params:
+            if p.size == 1:
+                p.value = abs(np.random.randn()) + 0.01
+            else:
+                p.value = np.random.randn(*p.shape)
+
+        param_vec_gpu = compiled._build_param_vector_gpu()
+
+        gc.collect()
+        cup.cuda.Device(0).synchronize()
+        start = time.perf_counter()
+
+        for _ in range(n_resolves):
+            compiled.canonicalize_inplace(param_vec_gpu)
 
         cup.cuda.Device(0).synchronize()
         elapsed = (time.perf_counter() - start) * 1000
@@ -306,6 +340,11 @@ def run_benchmark(problems=None, verbose=True):
         gpu_pre_times, gpu_pre_err = time_gpu_warm_prebuilt(
             prob, params, n_warmup, n_iters, n_resolves)
 
+        # GPU warm path inplace (pre-built + buffer reuse)
+        np.random.seed(7)
+        gpu_inp_times, gpu_inp_err = time_gpu_warm_inplace(
+            prob, params, n_warmup, n_iters, n_resolves)
+
         r = {
             "name": name,
             "correct": correct,
@@ -333,12 +372,22 @@ def run_benchmark(problems=None, verbose=True):
         if gpu_pre_err:
             r["gpu_prebuilt_error"] = gpu_pre_err
 
+        if gpu_inp_times:
+            r["gpu_inplace_mean_ms"] = round(statistics.mean(gpu_inp_times), 4)
+            r["gpu_inplace_std_ms"] = round(
+                statistics.stdev(gpu_inp_times), 4) if len(gpu_inp_times) > 1 else 0
+        if gpu_inp_err:
+            r["gpu_inplace_error"] = gpu_inp_err
+
         # Speedups
         if "cpu_mean_ms" in r and "gpu_mean_ms" in r and r["gpu_mean_ms"] > 0:
             r["speedup_gpu"] = round(r["cpu_mean_ms"] / r["gpu_mean_ms"], 2)
         if "cpu_mean_ms" in r and "gpu_prebuilt_mean_ms" in r and r["gpu_prebuilt_mean_ms"] > 0:
             r["speedup_gpu_prebuilt"] = round(
                 r["cpu_mean_ms"] / r["gpu_prebuilt_mean_ms"], 2)
+        if "cpu_mean_ms" in r and "gpu_inplace_mean_ms" in r and r["gpu_inplace_mean_ms"] > 0:
+            r["speedup_gpu_inplace"] = round(
+                r["cpu_mean_ms"] / r["gpu_inplace_mean_ms"], 2)
 
         results.append(r)
 

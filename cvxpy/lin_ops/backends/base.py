@@ -649,31 +649,34 @@ class PythonCanonBackend(CanonBackend):
         -------
         The function implementation.
         """
-        mapping = {
-            "sum": self.sum_op,
-            "mul": self.mul,
-            "promote": self.promote,
-            "broadcast_to": self.broadcast_to,
-            "neg": self.neg,
-            "mul_elem": self.mul_elem,
-            "sum_entries": self.sum_entries,
-            "div": self.div,
-            "reshape": self.reshape,
-            "index": self.index,
-            "diag_vec": self.diag_vec,
-            "hstack": self.hstack,
-            "vstack": self.vstack,
-            "concatenate": self.concatenate,
-            "transpose": self.transpose,
-            "upper_tri": self.upper_tri,
-            "diag_mat": self.diag_mat,
-            "rmul": self.rmul,
-            "trace": self.trace,
-            "conv": self.conv,
-            "kron_l": self.kron_l,
-            "kron_r": self.kron_r,
-        }
-        return mapping[func_name]
+        try:
+            return self._func_mapping[func_name]
+        except AttributeError:
+            self._func_mapping = {
+                "sum": self.sum_op,
+                "mul": self.mul,
+                "promote": self.promote,
+                "broadcast_to": self.broadcast_to,
+                "neg": self.neg,
+                "mul_elem": self.mul_elem,
+                "sum_entries": self.sum_entries,
+                "div": self.div,
+                "reshape": self.reshape,
+                "index": self.index,
+                "diag_vec": self.diag_vec,
+                "hstack": self.hstack,
+                "vstack": self.vstack,
+                "concatenate": self.concatenate,
+                "transpose": self.transpose,
+                "upper_tri": self.upper_tri,
+                "diag_mat": self.diag_mat,
+                "rmul": self.rmul,
+                "trace": self.trace,
+                "conv": self.conv,
+                "kron_l": self.kron_l,
+                "kron_r": self.kron_r,
+            }
+            return self._func_mapping[func_name]
 
     @staticmethod
     def sum_op(_lin: LinOp, view: TensorView) -> TensorView:

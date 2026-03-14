@@ -163,28 +163,36 @@ class COOBuilder:
 
     def add_block(self, row_offset: int, col_offset: int,
                   matrix, scale: float = 1.0):
-        """Add a dense or sparse matrix block at the given offset."""
+        """Add a dense or sparse matrix block at the given offset.
+
+        Vectorized: extends lists from numpy arrays instead of per-element append.
+        """
         if sp.issparse(matrix):
             coo = matrix.tocoo()
-            for i, j, v in zip(coo.row, coo.col, coo.data):
-                sv = scale * v
-                if sv != 0.0:
-                    self.rows.append(row_offset + i)
-                    self.cols.append(col_offset + j)
-                    self.data.append(sv)
+            data = coo.data * scale if scale != 1.0 else coo.data.copy()
+            mask = data != 0.0
+            if mask.all():
+                self.rows.extend((coo.row + row_offset).tolist())
+                self.cols.extend((coo.col + col_offset).tolist())
+                self.data.extend(data.tolist())
+            elif mask.any():
+                self.rows.extend((coo.row[mask] + row_offset).tolist())
+                self.cols.extend((coo.col[mask] + col_offset).tolist())
+                self.data.extend(data[mask].tolist())
         else:
-            mat = np.asarray(matrix)
-            nz = np.nonzero(mat)
+            mat = np.asarray(matrix, dtype=np.float64)
             if mat.ndim == 1:
-                for j in nz[0]:
-                    self.rows.append(row_offset)
-                    self.cols.append(col_offset + int(j))
-                    self.data.append(scale * float(mat[j]))
+                nz_idx = np.nonzero(mat)[0]
+                if len(nz_idx) > 0:
+                    self.rows.extend([row_offset] * len(nz_idx))
+                    self.cols.extend((nz_idx + col_offset).tolist())
+                    self.data.extend((scale * mat[nz_idx]).tolist())
             else:
-                for i, j in zip(nz[0], nz[1]):
-                    self.rows.append(row_offset + int(i))
-                    self.cols.append(col_offset + int(j))
-                    self.data.append(scale * float(mat[i, j]))
+                nz_rows, nz_cols = np.nonzero(mat)
+                if len(nz_rows) > 0:
+                    self.rows.extend((nz_rows + row_offset).tolist())
+                    self.cols.extend((nz_cols + col_offset).tolist())
+                    self.data.extend((scale * mat[nz_rows, nz_cols]).tolist())
 
     def add_arrays(self, row_indices, col_indices, data_vals, row_offset=0):
         """Batch-add from numpy arrays (fast path)."""

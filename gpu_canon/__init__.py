@@ -17,7 +17,8 @@ Usage:
     A_cpu, b_cpu, c_cpu, cone_dims_cpu = canonicalize_cpu(prob)
 """
 
-from gpu_canon.backend import canonicalize_gpu
+from gpu_canon.backend import canonicalize_gpu, CompiledProgram
 from gpu_canon.baseline import canonicalize_cpu
+from gpu_canon.direct import from_data
 
-__all__ = ["canonicalize_gpu", "canonicalize_cpu"]
+__all__ = ["canonicalize_gpu", "canonicalize_cpu", "CompiledProgram", "from_data"]

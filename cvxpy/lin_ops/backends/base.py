@@ -232,11 +232,15 @@ class TensorRepresentation:
         2D sparse array in the requested format.
         """
         if order == 'F':
-            rows = (self.col.astype(np.int64) * np.int64(self.shape[0]) + self.row.astype(np.int64))
-            cols = self.parameter_offset.astype(np.int64)
+            col_i64 = self.col.astype(np.int64, copy=False)
+            row_i64 = self.row.astype(np.int64, copy=False)
+            rows = col_i64 * np.int64(self.shape[0]) + row_i64
+            cols = self.parameter_offset.astype(np.int64, copy=False)
         elif order == 'C':
-            rows = (self.col.astype(np.int64) + self.row.astype(np.int64) * np.int64(self.shape[1]))
-            cols = self.parameter_offset.astype(np.int64)
+            col_i64 = self.col.astype(np.int64, copy=False)
+            row_i64 = self.row.astype(np.int64, copy=False)
+            rows = col_i64 + row_i64 * np.int64(self.shape[1])
+            cols = self.parameter_offset.astype(np.int64, copy=False)
         else:
             raise ValueError(f"order must be 'F' or 'C', got '{order}'")
 

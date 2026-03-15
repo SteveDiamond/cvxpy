@@ -1,0 +1,53 @@
+{
+  "benchmark": "end_to_end_solve",
+  "results": [
+    {
+      "name": "LP 500x250",
+      "cpu_canon_ms": 2.35,
+      "cpu_solve_only_ms": 3.01,
+      "cpu_total_ms": 5.36,
+      "cpu_canon_pct": 43.8,
+      "trace_canon_ms": 0.881,
+      "trace_source": "prior_benchmark",
+      "estimated_e2e_trace_ms": 3.9,
+      "canon_speedup": 2.7,
+      "e2e_speedup": 1.38
+    },
+    {
+      "name": "LP 2000x1000",
+      "cpu_canon_ms": 5.95,
+      "cpu_solve_only_ms": 316.06,
+      "cpu_total_ms": 322.01,
+      "cpu_canon_pct": 1.8,
+      "trace_canon_ms": 6.97,
+      "trace_source": "prior_benchmark",
+      "estimated_e2e_trace_ms": 323.03,
+      "canon_speedup": 0.9,
+      "e2e_speedup": 1.0
+    },
+    {
+      "name": "LASSO 500x1000",
+      "cpu_canon_ms": 138.18,
+      "cpu_solve_only_ms": 2977.32,
+      "cpu_total_ms": 3115.5,
+      "cpu_canon_pct": 4.4,
+      "trace_canon_ms": 2.708,
+      "trace_source": "prior_benchmark",
+      "estimated_e2e_trace_ms": 2980.02,
+      "canon_speedup": 51.0,
+      "e2e_speedup": 1.05
+    },
+    {
+      "name": "Portfolio 200",
+      "cpu_canon_ms": 354.09,
+      "cpu_solve_only_ms": 35.75,
+      "cpu_total_ms": 389.84,
+      "cpu_canon_pct": 90.8,
+      "trace_canon_ms": 0.991,
+      "trace_source": "prior_benchmark",
+      "estimated_e2e_trace_ms": 36.74,
+      "canon_speedup": 357.3,
+      "e2e_speedup": 10.61
+    }
+  ]
+}

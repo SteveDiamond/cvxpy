@@ -1,0 +1,23 @@
+{
+  "benchmark": "trace_overhead_cold_path",
+  "results": [
+    {
+      "name": "LP 500x250",
+      "untraced_mean_ms": 2.391,
+      "untraced_std_ms": 0.039,
+      "traced_mean_ms": 3.897,
+      "traced_std_ms": 0.08,
+      "overhead_ms": 1.506,
+      "overhead_pct": 63.0
+    },
+    {
+      "name": "LASSO 500x1000",
+      "untraced_mean_ms": 151.402,
+      "untraced_std_ms": 0.384,
+      "traced_mean_ms": 185.733,
+      "traced_std_ms": 33.951,
+      "overhead_ms": 34.332,
+      "overhead_pct": 22.7
+    }
+  ]
+}

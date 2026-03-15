@@ -1,0 +1,136 @@
+{
+  "timestamp": "2026-03-14T23:46:51Z",
+  "gpu": "NVIDIA H100 PCIe",
+  "commit": "ff3b0f843",
+  "warmup": 3,
+  "iterations": 10,
+  "problems": [
+    {
+      "name": "LP 100x50",
+      "type": "lp",
+      "cpu_ms": 2.664,
+      "trace_replay_ms": 0.523,
+      "trace_speedup": 5.09,
+      "trace_ops_replayed": 13,
+      "trace_ops_total": 126
+    },
+    {
+      "name": "LP 500x250",
+      "type": "lp",
+      "cpu_ms": 31.049,
+      "trace_replay_ms": 0.881,
+      "trace_speedup": 35.25,
+      "trace_ops_replayed": 13,
+      "trace_ops_total": 126
+    },
+    {
+      "name": "LP 1000x500",
+      "type": "lp",
+      "cpu_ms": 126.47,
+      "trace_replay_ms": 2.0,
+      "trace_speedup": 63.23,
+      "trace_ops_replayed": 13,
+      "trace_ops_total": 126
+    },
+    {
+      "name": "LP 2000x1000",
+      "type": "lp",
+      "cpu_ms": 561.503,
+      "trace_replay_ms": 6.97,
+      "trace_speedup": 80.55,
+      "trace_ops_replayed": 13,
+      "trace_ops_total": 126
+    },
+    {
+      "name": "LASSO 100x200",
+      "type": "lasso",
+      "cpu_ms": 7.191,
+      "trace_replay_ms": 1.063,
+      "trace_speedup": 6.76,
+      "trace_ops_replayed": 28,
+      "trace_ops_total": 272
+    },
+    {
+      "name": "LASSO 500x1000",
+      "type": "lasso",
+      "cpu_ms": 108.947,
+      "trace_replay_ms": 2.708,
+      "trace_speedup": 40.23,
+      "trace_ops_replayed": 28,
+      "trace_ops_total": 272
+    },
+    {
+      "name": "Portfolio 50",
+      "type": "portfolio",
+      "cpu_ms": 46.849,
+      "trace_replay_ms": 0.856,
+      "trace_speedup": 54.7,
+      "trace_ops_replayed": 26,
+      "trace_ops_total": 225
+    },
+    {
+      "name": "Portfolio 200",
+      "type": "portfolio",
+      "cpu_ms": 376.082,
+      "trace_replay_ms": 0.991,
+      "trace_speedup": 379.58,
+      "trace_ops_replayed": 26,
+      "trace_ops_total": 225
+    },
+    {
+      "name": "Param LP 100x50",
+      "type": "param_lp",
+      "cpu_ms": 2.843,
+      "trace_replay_ms": 0.565,
+      "trace_speedup": 5.03,
+      "trace_ops_replayed": 13,
+      "trace_ops_total": 151,
+      "dpp_warm_ms": 0.453,
+      "dpp_speedup": 6.27
+    },
+    {
+      "name": "Param LP 500x250",
+      "type": "param_lp",
+      "cpu_ms": 23.587,
+      "trace_replay_ms": 0.897,
+      "trace_speedup": 26.3,
+      "trace_ops_replayed": 13,
+      "trace_ops_total": 151,
+      "dpp_warm_ms": 0.67,
+      "dpp_speedup": 35.22
+    },
+    {
+      "name": "Param LP 1000x500",
+      "type": "param_lp",
+      "cpu_ms": 95.242,
+      "trace_replay_ms": 2.004,
+      "trace_speedup": 47.53,
+      "trace_ops_replayed": 13,
+      "trace_ops_total": 151,
+      "dpp_warm_ms": 1.541,
+      "dpp_speedup": 61.79
+    },
+    {
+      "name": "Param LASSO 100x200",
+      "type": "param_lasso",
+      "cpu_ms": 7.658,
+      "trace_replay_ms": 0.93,
+      "trace_speedup": 8.24,
+      "trace_ops_replayed": 23,
+      "trace_ops_total": 286,
+      "dpp_warm_ms": 0.424,
+      "dpp_speedup": 18.05
+    },
+    {
+      "name": "Param LASSO 500x1000",
+      "type": "param_lasso",
+      "cpu_ms": 466.51,
+      "trace_replay_ms": 2.4,
+      "trace_speedup": 194.41,
+      "trace_ops_replayed": 23,
+      "trace_ops_total": 286,
+      "dpp_warm_ms": 1.587,
+      "dpp_speedup": 294.01
+    }
+  ]
+}

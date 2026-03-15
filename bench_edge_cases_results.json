@@ -1,0 +1,90 @@
+{
+  "benchmark": "edge_case_stress_test",
+  "results": [
+    {
+      "name": "SOC constraints",
+      "trace_ok": true,
+      "replay_ok": true,
+      "trace_time_ms": 8733.82,
+      "replay_time_ms": 1.34,
+      "trace_ops": 186,
+      "data_ops": 19,
+      "error": "",
+      "constant_ops": 167,
+      "correctness_checks": {
+        "A": "True",
+        "b": "True",
+        "c": "True"
+      },
+      "correct": true
+    },
+    {
+      "name": "PSD (SDP)",
+      "trace_ok": true,
+      "replay_ok": true,
+      "trace_time_ms": 16.94,
+      "replay_time_ms": 0.64,
+      "trace_ops": 267,
+      "data_ops": 22,
+      "error": "",
+      "constant_ops": 245,
+      "correctness_checks": {
+        "A": "True",
+        "b": "True",
+        "c": "shape mismatch (100,) vs (55,)"
+      },
+      "correct": false
+    },
+    {
+      "name": "Exponential cone",
+      "trace_ok": true,
+      "replay_ok": true,
+      "trace_time_ms": 10.42,
+      "replay_time_ms": 0.6,
+      "trace_ops": 190,
+      "data_ops": 18,
+      "error": "",
+      "constant_ops": 172,
+      "correctness_checks": {
+        "A": "True",
+        "b": "True",
+        "c": "True"
+      },
+      "correct": true
+    },
+    {
+      "name": "Mixed-integer (boolean)",
+      "trace_ok": true,
+      "replay_ok": true,
+      "trace_time_ms": 9.2,
+      "replay_time_ms": 0.52,
+      "trace_ops": 158,
+      "data_ops": 15,
+      "error": "",
+      "constant_ops": 143,
+      "correctness_checks": {
+        "A": "True",
+        "b": "True",
+        "c": "True"
+      },
+      "correct": true
+    },
+    {
+      "name": "Very large LP 10000x5000",
+      "trace_ok": true,
+      "replay_ok": true,
+      "trace_time_ms": 42.13,
+      "replay_time_ms": 2.73,
+      "trace_ops": 128,
+      "data_ops": 14,
+      "error": "",
+      "constant_ops": 114,
+      "correctness_checks": {
+        "A": "True",
+        "b": "True",
+        "c": "True"
+      },
+      "correct": true
+    }
+  ]
+}

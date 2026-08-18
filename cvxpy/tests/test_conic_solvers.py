@@ -22,6 +22,7 @@ import string
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -2174,6 +2175,20 @@ class TestGUROBI(BaseTest):
         expected_bounds = sth.prob.variables()[0].bounds
         actual_bounds = [x.LB, x.UB]
         np.testing.assert_equal(actual_bounds, expected_bounds)
+
+    def test_gurobi_socp_uses_bulk_model_api(self) -> None:
+        import gurobipy
+
+        if not hasattr(gurobipy.Model, "addMConstr"):
+            self.skipTest("The installed Gurobi version does not support matrix constraints.")
+
+        x = cp.Variable(4)
+        prob = cp.Problem(cp.Minimize(cp.sum(x)), [cp.norm(x) <= 1])
+        with mock.patch.object(gurobipy.Model, "addVar", side_effect=AssertionError), \
+                mock.patch.object(gurobipy.Model, "addLConstr", side_effect=AssertionError):
+            result = prob.solve(solver=cp.GUROBI)
+
+        self.assertAlmostEqual(result, -2)
 
     def test_gurobi_mi_lp_0(self) -> None:
         StandardTestLPs.test_mi_lp_0(solver='GUROBI')
